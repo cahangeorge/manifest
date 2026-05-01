@@ -1,5 +1,6 @@
 import {
   Controller,
+  Get,
   Post,
   Req,
   Res,
@@ -54,6 +55,27 @@ export class ProxyController {
     private readonly signatureCache: ThoughtSignatureCache,
     private readonly thinkingCache: ThinkingBlockCache,
   ) {}
+
+  /** OpenAI-compatible GET /v1/models — returns Manifest's routing tier names.
+   *  Hermes and other OpenAI-compatible clients call this to enumerate models. */
+  @Get('models')
+  getModels(@Res() res: ExpressResponse): void {
+    const TIER_MODELS = [
+      'auto', 'simple', 'standard', 'complex', 'reasoning',
+      'coding', 'web-browsing', 'data-analysis', 'social-media',
+      'email', 'calendar', 'trading',
+    ];
+    const now = Math.floor(Date.now() / 1000);
+    res.json({
+      object: 'list',
+      data: TIER_MODELS.map((id) => ({
+        id,
+        object: 'model',
+        created: now,
+        owned_by: 'manifest',
+      })),
+    });
+  }
 
   @Post('chat/completions')
   async chatCompletions(
