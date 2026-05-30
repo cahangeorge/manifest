@@ -5,13 +5,15 @@ import { ProviderKeyService } from '../routing-core/provider-key.service';
 import { TierService } from '../routing-core/tier.service';
 import { OpenaiOauthService } from '../oauth/openai-oauth.service';
 import { MinimaxOauthService } from '../oauth/minimax-oauth.service';
+import { AnthropicOauthService } from '../oauth/anthropic/anthropic-oauth.service';
 import { ForwardResult } from './provider-client';
 import { SessionMomentumService } from './session-momentum.service';
 import { LimitCheckService } from '../../notifications/services/limit-check.service';
 import { shouldTriggerFallback } from './fallback-status-codes';
 import { Tier, TIERS, ScorerMessage } from '../../scoring/types';
-import type { SpecificityCategory, TierSlot } from 'manifest-shared';
-import { SPECIFICITY_CATEGORIES } from 'manifest-shared';
+import type { RequestParamDefaults, SpecificityCategory, TierSlot } from 'manifest-shared';
+import { SPECIFICITY_CATEGORIES, snapshotRequestParams } from 'manifest-shared';
+import type { ParamMergeContext } from './proxy-fallback.service';
 import {
   ProxyFallbackService,
   FailedFallback,
@@ -26,18 +28,20 @@ import {
 } from './proxy-types';
 import { ThoughtSignatureCache } from './thought-signature-cache';
 import { ThinkingBlockCache } from './thinking-block-cache';
+import { AgentModelParamsService } from '../routing-core/agent-model-params.service';
 import { buildFriendlyResponse, getDashboardUrl } from './proxy-friendly-response';
 import { formatManifestError } from '../../common/errors/error-codes';
 import { peekStream } from './stream-warmup';
 import type { AuthType } from 'manifest-shared';
 import { toChatCompletionsRequest } from './responses-adapter';
+import { messagesToChatCompletionsRequest } from './anthropic-messages-adapter';
 
 const STREAM_WARMUP_MS = 15_000;
 
 type ResolvedRouting = Awaited<ReturnType<ResolveService['resolve']>>;
 
 /**
- * Roles excluded from scoring. Personal AI agents (OpenClaw, Hermes, and
+ * Roles excluded from scoring. AI agents (OpenClaw, Hermes, and
  * similar tools) inject a large, keyword-rich system prompt with every
  * request. Scoring it inflates every request to the most expensive tier.
  * We strip these before the scorer sees them, but forward the full
@@ -58,6 +62,7 @@ export interface RoutingMeta {
   header_tier_id?: string;
   header_tier_name?: string;
   header_tier_color?: string;
+  provider_key_label?: string;
   fallbackFromModel?: string;
   fallbackIndex?: number;
   primaryErrorStatus?: number;
@@ -69,6 +74,24 @@ export interface RoutingMeta {
    * failure row to the correct vendor.
    */
   primaryProvider?: string;
+  /**
+   * Auth type of the primary model when a fallback ultimately succeeded.
+   * In a fallback-success flow, `auth_type` holds the fallback's auth so
+   * the recorder costs the success row correctly; this field preserves the
+   * primary's auth so the primary-failure row stays accurate too. See #1173.
+   */
+  primaryAuthType?: string;
+  /**
+   * Effective request body parameters for this attempt — the merged result
+   * of (1) client body keys in `REQUEST_PARAM_KEYS`, (2) the user's saved
+   * per-route params from `agent_model_params` for the attempt's
+   * (provider, auth_type, model) tuple, and (3) the provider's natural
+   * API default for any unset key. Persisted on
+   * `agent_messages.request_params` so the dashboard can show "this
+   * request had thinking=disabled" alongside Request Headers in the
+   * expanded row. `null` when no known params apply.
+   */
+  request_params?: RequestParamDefaults | null;
 }
 
 export interface ProxyResult {
@@ -87,12 +110,14 @@ export class ProxyService {
     private readonly tierService: TierService,
     private readonly openaiOauth: OpenaiOauthService,
     private readonly minimaxOauth: MinimaxOauthService,
+    private readonly anthropicOauth: AnthropicOauthService,
     private readonly momentum: SessionMomentumService,
     private readonly limitCheck: LimitCheckService,
     private readonly fallbackService: ProxyFallbackService,
     private readonly config: ConfigService,
     private readonly signatureCache: ThoughtSignatureCache,
     private readonly thinkingCache: ThinkingBlockCache,
+    private readonly modelParamsService: AgentModelParamsService,
   ) {}
 
   async proxyRequest(opts: ProxyRequestOptions): Promise<ProxyResult> {
@@ -108,7 +133,12 @@ export class ProxyService {
       headers,
     } = opts;
     const apiMode = opts.apiMode ?? 'chat_completions';
-    const chatBody = apiMode === 'responses' ? toChatCompletionsRequest(body) : undefined;
+    const chatBody =
+      apiMode === 'responses'
+        ? toChatCompletionsRequest(body)
+        : apiMode === 'messages'
+          ? messagesToChatCompletionsRequest(body)
+          : undefined;
     const routingBody = chatBody ?? body;
     this.validatePayload(routingBody);
 
@@ -136,6 +166,7 @@ export class ProxyService {
     const credentials = await this.resolveCredentials(agentId, userId, {
       provider: route.provider,
       auth_type: route.authType,
+      provider_key_label: route.keyLabel ?? undefined,
     });
     if (credentials === null) {
       const dashboardUrl = getDashboardUrl(this.config, agentName, 'routing');
@@ -154,6 +185,31 @@ export class ProxyService {
     const thinkingLookup = (firstToolUseId: string) =>
       this.thinkingCache.retrieve(sessionKey, firstToolUseId);
 
+    // Per-attempt param-defaults merge happens inside the fallback service
+    // so each forward (primary + every fallback iteration) looks up its
+    // own (provider, auth_type, model) tuple in the model-params service.
+    // Pass the agentId here as a thin context bag; the storage is already
+    // route-scoped, so no per-provider filter is needed downstream.
+    const paramMergeContext: ParamMergeContext = { agentId };
+
+    // Snapshot of which known param keys are *effectively in play* for the
+    // primary attempt. Stored on every `agent_messages` row recorded for
+    // this request so the dashboard can display the effective parameters
+    // (today: DeepSeek's `thinking` toggle) in the expanded message detail.
+    // Re-derived for fallback successes against the actual fallback
+    // provider so the persisted snapshot matches what was sent on that row.
+    const primaryModelParams = await this.modelParamsService.get(
+      agentId,
+      route.provider,
+      route.authType,
+      primaryModel,
+    );
+    const primaryRequestParams = snapshotRequestParams({
+      body: routingBody as Record<string, unknown>,
+      modelParams: primaryModelParams,
+      provider: route.provider,
+    });
+
     const forward = await this.fallbackService.tryForwardToProvider({
       provider: route.provider,
       apiKey: credentials.apiKey,
@@ -169,6 +225,7 @@ export class ProxyService {
       providerRegion: credentials.providerRegion,
       signatureLookup,
       thinkingLookup,
+      paramMergeContext,
     });
 
     if (!forward.response.ok && shouldTriggerFallback(forward.response.status)) {
@@ -186,6 +243,7 @@ export class ProxyService {
         signatureLookup,
         thinkingLookup,
         apiMode,
+        paramMergeContext,
       });
       if (fallbackResult) return fallbackResult;
     }
@@ -205,10 +263,16 @@ export class ProxyService {
           isGoogle: forward.isGoogle,
           isAnthropic: forward.isAnthropic,
           isChatGpt: forward.isChatGpt,
+          isResponses: forward.isResponses,
         };
         this.recordTierIfScoring(sessionKey, resolved.tier);
         this.recordCategoryIfValid(sessionKey, resolved.specificity_category);
-        return { forward: peeked, meta: this.buildBaseMeta(resolved, primaryModel) };
+        return {
+          forward: peeked,
+          meta: this.buildBaseMeta(resolved, primaryModel, {
+            request_params: primaryRequestParams,
+          }),
+        };
       }
 
       this.logger.warn(
@@ -223,6 +287,7 @@ export class ProxyService {
         isGoogle: forward.isGoogle,
         isAnthropic: forward.isAnthropic,
         isChatGpt: forward.isChatGpt,
+        isResponses: forward.isResponses,
       };
       const fallbackResult = await this.tryFallbackChain({
         agentId,
@@ -238,6 +303,7 @@ export class ProxyService {
         signatureLookup,
         thinkingLookup,
         apiMode,
+        paramMergeContext,
       });
       if (fallbackResult) return fallbackResult;
 
@@ -245,14 +311,21 @@ export class ProxyService {
       // instead of the original forward (whose body was consumed by peekStream).
       this.recordTierIfScoring(sessionKey, resolved.tier);
       this.recordCategoryIfValid(sessionKey, resolved.specificity_category);
-      return { forward: syntheticForward, meta: this.buildBaseMeta(resolved, primaryModel) };
+      return {
+        forward: syntheticForward,
+        meta: this.buildBaseMeta(resolved, primaryModel, {
+          request_params: primaryRequestParams,
+        }),
+      };
     }
 
     this.recordTierIfScoring(sessionKey, resolved.tier);
     this.recordCategoryIfValid(sessionKey, resolved.specificity_category);
     return {
       forward,
-      meta: this.buildBaseMeta(resolved, primaryModel),
+      meta: this.buildBaseMeta(resolved, primaryModel, {
+        request_params: primaryRequestParams,
+      }),
     };
   }
 
@@ -305,12 +378,13 @@ export class ProxyService {
   private async resolveCredentials(
     agentId: string,
     userId: string,
-    resolved: { provider: string; auth_type?: AuthType },
+    resolved: { provider: string; auth_type?: AuthType; provider_key_label?: string },
   ): Promise<{ apiKey: string; resourceUrl?: string; providerRegion?: string | null } | null> {
     const apiKey = await this.providerKeyService.getProviderApiKey(
       agentId,
       resolved.provider,
       resolved.auth_type,
+      resolved.provider_key_label,
     );
     if (apiKey === null) return null;
 
@@ -322,11 +396,13 @@ export class ProxyService {
       userId,
       this.openaiOauth,
       this.minimaxOauth,
+      this.anthropicOauth,
     );
     const providerRegion = await this.providerKeyService.getProviderRegion(
       agentId,
       resolved.provider,
       resolved.auth_type,
+      resolved.provider_key_label,
     );
     return { ...unwrapped, providerRegion };
   }
@@ -345,6 +421,7 @@ export class ProxyService {
     signatureLookup: SignatureLookup;
     thinkingLookup: ThinkingBlockLookup;
     apiMode: ProxyApiMode;
+    paramMergeContext: ParamMergeContext;
   }): Promise<ProxyResult | null> {
     const {
       agentId,
@@ -391,21 +468,41 @@ export class ProxyService {
       apiMode,
       chatBody,
       fallbackRoutes,
+      args.paramMergeContext,
     );
 
     this.recordTierIfScoring(sessionKey, resolved.tier);
     this.recordCategoryIfValid(sessionKey, resolved.specificity_category);
 
     if (success) {
+      // Re-snapshot for the fallback's actual provider — its model-scoped
+      // params row (if any) is what was actually applied. Different model
+      // → different lookup → different snapshot, matching the wire.
+      const fallbackModelParams = success.authType
+        ? await this.modelParamsService.get(
+            args.paramMergeContext.agentId,
+            success.provider,
+            success.authType,
+            success.model,
+          )
+        : null;
+      const fallbackRequestParams = snapshotRequestParams({
+        body: body as Record<string, unknown>,
+        modelParams: fallbackModelParams,
+        provider: success.provider,
+      });
       return {
         forward: success.forward,
         meta: this.buildBaseMeta(resolved, success.model, {
           provider: success.provider,
+          auth_type: success.authType,
           fallbackFromModel: primaryModel,
           fallbackIndex: success.fallbackIndex,
           primaryErrorStatus: primaryStatus,
           primaryErrorBody,
           primaryProvider,
+          primaryAuthType: primaryAuth,
+          request_params: fallbackRequestParams,
         }),
         failedFallbacks: failures,
       };
@@ -420,14 +517,35 @@ export class ProxyService {
     safeHeaders.delete('transfer-encoding');
     const rebuilt = new Response(primaryErrorBody, { status: primaryStatus, headers: safeHeaders });
 
+    // Fallback exhausted — recorded against the primary provider, so use
+    // the primary-provider snapshot for the row. Look up the primary's
+    // model-params one more time so the snapshot reflects what was sent
+    // before the chain failed.
+    const primaryModelParams =
+      primaryProvider && primaryAuth && resolved.route
+        ? await this.modelParamsService.get(
+            args.paramMergeContext.agentId,
+            primaryProvider,
+            primaryAuth as 'api_key' | 'subscription' | 'local',
+            primaryModel,
+          )
+        : null;
+    const exhaustedRequestParams = snapshotRequestParams({
+      body: body as Record<string, unknown>,
+      modelParams: primaryModelParams,
+      provider: primaryProvider ?? '',
+    });
     return {
       forward: {
         response: rebuilt,
         isGoogle: forward.isGoogle,
         isAnthropic: forward.isAnthropic,
         isChatGpt: forward.isChatGpt,
+        isResponses: forward.isResponses,
       },
-      meta: this.buildBaseMeta(resolved, primaryModel),
+      meta: this.buildBaseMeta(resolved, primaryModel, {
+        request_params: exhaustedRequestParams,
+      }),
       failedFallbacks: failures,
     };
   }
@@ -445,6 +563,7 @@ export class ProxyService {
       reason: resolved.reason,
       auth_type: resolved.route?.authType,
       specificity_category: resolved.specificity_category,
+      provider_key_label: resolved.route?.keyLabel ?? undefined,
       header_tier_id: resolved.header_tier_id,
       header_tier_name: resolved.header_tier_name,
       header_tier_color: resolved.header_tier_color,

@@ -1,5 +1,11 @@
 import { OLLAMA_CLOUD_HOST, OLLAMA_HOST } from '../../common/constants/ollama';
 import { PROVIDER_BY_ID_OR_ALIAS } from '../../common/constants/providers';
+import {
+  CODEX_CLI_ORIGINATOR,
+  CODEX_CLI_USER_AGENT,
+  COPILOT_EDITOR_VERSION,
+  COPILOT_PLUGIN_VERSION,
+} from '../../common/constants/subscription-clients';
 import { normalizeProviderBaseUrl } from '../provider-base-url';
 import { getQwenCompatibleBaseUrl } from '../qwen-region';
 
@@ -68,8 +74,8 @@ const OPENCODE_GO_BASE = 'https://opencode.ai/zen/go';
 const chatgptSubscriptionHeaders = (apiKey: string) => ({
   Authorization: `Bearer ${apiKey}`,
   'Content-Type': 'application/json',
-  originator: 'codex_cli_rs',
-  'user-agent': 'codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown',
+  originator: CODEX_CLI_ORIGINATOR,
+  'user-agent': CODEX_CLI_USER_AGENT,
 });
 
 export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
@@ -101,6 +107,12 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
   },
   deepseek: {
     baseUrl: 'https://api.deepseek.com',
+    buildHeaders: openaiHeaders,
+    buildPath: openaiPath,
+    format: 'openai',
+  },
+  groq: {
+    baseUrl: 'https://api.groq.com/openai',
     buildHeaders: openaiHeaders,
     buildPath: openaiPath,
     format: 'openai',
@@ -155,7 +167,13 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
   },
   google: {
     baseUrl: 'https://generativelanguage.googleapis.com',
-    buildHeaders: () => ({ 'Content-Type': 'application/json' }),
+    // Google accepts the API key via the `x-goog-api-key` header as well as
+    // the `?key=` query parameter. Header is preferable: query strings show
+    // up in upstream proxy / load-balancer access logs, header values do not.
+    buildHeaders: (apiKey: string) => ({
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    }),
     buildPath: (model: string) => `/v1beta/models/${model}:generateContent`,
     format: 'google',
   },
@@ -164,12 +182,26 @@ export const PROVIDER_ENDPOINTS: Record<string, ProviderEndpoint> = {
     buildHeaders: (apiKey: string) => ({
       Authorization: `Bearer ${apiKey}`,
       'Content-Type': 'application/json',
-      'Editor-Version': 'vscode/1.100.0',
-      'Editor-Plugin-Version': 'copilot/1.300.0',
+      'Editor-Version': COPILOT_EDITOR_VERSION,
+      'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
       'Copilot-Integration-Id': 'vscode-chat',
     }),
     buildPath: () => '/chat/completions',
     format: 'openai',
+  },
+  // Codex variants (e.g. gpt-5-codex, gpt-5.2-codex, gpt-5.3-codex) only accept
+  // /responses on Copilot — /chat/completions returns "Unsupported API for model".
+  'copilot-responses': {
+    baseUrl: 'https://api.githubcopilot.com',
+    buildHeaders: (apiKey: string) => ({
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'Editor-Version': COPILOT_EDITOR_VERSION,
+      'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
+      'Copilot-Integration-Id': 'vscode-chat',
+    }),
+    buildPath: () => '/responses',
+    format: 'chatgpt',
   },
   openrouter: {
     baseUrl: 'https://openrouter.ai',

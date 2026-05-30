@@ -1,5 +1,187 @@
 # manifest
 
+## 6.5.0
+
+### Minor Changes
+
+- c4571f7: Add Playground page: compare LLM responses from multiple models side by side for cost, output tokens, and latency. Includes request-headers popover, history drawer with replay, and markdown rendering of responses.
+
+### Patch Changes
+
+- f2074dd: Make Anthropic OAuth token exchange diagnostics safe when fields are missing.
+- 3ff3087: Persist Anthropic OAuth pending state in Postgres so production exchanges survive reloads, restarts, and multi-instance routing.
+- 7913169: Align Anthropic OAuth state handling with the Claude Code PKCE flow.
+- ed05898: Add Claude Code-compatible Anthropic OAuth token headers and safe request-shape diagnostics.
+- 0421e0a: Fall back to the OAuth state when Anthropic pending verifier data is missing.
+- d00e52b: Fix custom providers in the Playground. Selecting a model from a custom (OpenAI/Anthropic-compatible) provider now resolves its endpoint instead of failing with "Provider request failed".
+- 2b1c9b5: Hide the misleading empty "tier" label in the Playground model picker. The subtitle now only shows when a real routing tier applies.
+
+## 6.4.0
+
+### Minor Changes
+
+- 24832a3: Add Nanobot to the supported personal AI agents list. The setup screen renders a paste-ready `~/.nanobot/config.json` block that points the `manifest` provider at the Manifest endpoint and selects model `auto` by default.
+- d7dc183: Move request body defaults (today: DeepSeek's `thinking` toggle) from tier-scoped storage to per-route storage. Settings now travel with the model identity (`agent_id`, `provider`, `auth_type`, `model_name`) wherever the model appears — default tier primary, specificity fallback, header-tier primary, anywhere. **Behavior change:** Manifest no longer auto-disables DeepSeek's thinking mode on simple/standard/complex tiers. Users who never configured a value will see the provider's natural default (thinking enabled) instead of Manifest's previous cost-saving override. To get the old behavior back, configure thinking explicitly per-model from the Routing page once the frontend ships. Migration backfills the existing per-tier config to every compatible route in the assignment (primary + fallbacks) so no per-model setting is silently lost. Adds new endpoints `GET/PUT/DELETE /api/v1/routing/:agent/model-params` for the upcoming frontend.
+- 4cba5b3: Routing UI: every model row (primary chip, fallback row, header-tier primary, header-tier fallback) now exposes the per-model Parameters affordance for any provider whose API consumes a known knob (today: DeepSeek's `thinking`). Settings travel with the model identity wherever it appears — saving DeepSeek's thinking mode on one slot updates every other slot showing the same model. Closes the long-standing gap on the "custom" (header-tier) routing surface, which previously had no params support at all. Wires the new `GET/PUT/DELETE /api/v1/routing/:agent/model-params` endpoints shipped in the backend PR.
+- a8e907e: Add full OAuth flow for the Anthropic Claude Pro / Max subscription. Connecting
+  your Claude subscription is now a one-click "Sign in with Claude" → paste the
+  authorization code, instead of running `claude setup-token` in a separate
+  terminal. Tokens auto-refresh through the same blob/refresh path used by OpenAI.
+
+  Internally the OAuth code in `routing/oauth/` was split into shared `core/`
+  primitives (PKCE, token-blob storage, pending-state TTL, callback HTML) plus
+  per-provider files. The OpenAI service now delegates to the same primitives,
+  and a new `oauth/anthropic/` package implements the paste-code flow.
+
+### Patch Changes
+
+- a254c32: Add OpenCode to the Coding Assistant setup flow. The setup screen now renders a paste-ready OpenCode config block for the global or project config, registers Manifest as an OpenAI-compatible provider, and selects `manifest/auto` by default.
+- 6f52fdd: Normalize Chat Completions `image_url` parts to Responses API `input_image` parts before forwarding to `/v1/responses`.
+- bbcfa50: Stop filtering the canonical `gemini-3.1-flash-lite-preview` (and similar non-dated `flash-lite-preview` aliases) from Gemini model discovery. The previous regex was meant to drop deprecated dated snapshots like `gemini-2.5-flash-lite-preview-09-2025` but over-matched and removed live preview models too. Tightened to require a `-MM-YYYY` date suffix so dated snapshots still get filtered while canonical previews surface.
+- 91088e2: Fix "Add another key" button for OAuth subscription providers
+- cedeba2: Extract Wingman to a standalone hosted SPA at `wingman.manifest.build`.
+  The dashboard's bottom drawer stays dev-only (dead-code-eliminated from
+  production / self-hosted bundles) and now embeds the hosted build by
+  default. Contributors can still point it at a local Wingman with
+  `VITE_WINGMAN_URL`. Dev-mode CORS allow-lists the hosted origin so
+  contributors can use the hosted SPA against a local backend; production
+  never enables CORS, so nothing Wingman-related ships to self-hosted
+  deployments. The `packages/wingman/` workspace is removed; source moves
+  to https://github.com/mnfst/wingman.
+- abf3c15: Show a small "Last used" badge on the sign-in and sign-up pages so returning visitors can see at a glance which method (email or one of the social providers) they used last time. The hint is stored per-browser in `localStorage` and is best-effort: it falls back silently when storage is unavailable.
+- 9b4a586: Accept MiniMax Coding Plan `sk-cp-` tokens on the MiniMax subscription tile alongside the device-code OAuth flow. The region picker now applies to both paths, so CN Coding Plan tokens route to `api.minimaxi.com` for both model discovery and proxied requests. Closes #1467.
+- d9e6232: Improve the dashboard layout on phone-sized screens with a compact navigation drawer, tighter header chrome, and mobile-sized chart stats.
+- 828812c: Patch five high-severity Dependabot alerts in transitive dependencies.
+  - `fast-uri` 3.1.0 → 3.1.2 (path traversal + host confusion, dev-only via `@nestjs/schematics`).
+  - `kysely` 0.28.14 → 0.28.17 via `better-auth` 1.4 → 1.6 (JSON-path injection in `JSONPathBuilder`, runtime).
+  - `undici` 5.x → 6.25 via `@codecov/vite-plugin` 1 → 2 (HTTP smuggling + CRLF injection, dev/build only).
+
+  No behavior change. Better Auth bump is patch-compatible (1.4 → 1.6) — login, register, OAuth round-trips verified locally.
+
+- 7792ef8: Coerce unknown Anthropic Messages tool types to custom tools instead of forwarding unsupported server-tool tags, and normalize missing array `items` in forwarded tool schemas for OpenAI compatibility.
+- 504a7af: Route Anthropic and MiniMax subscription disconnects through provider-specific OAuth cleanup endpoints
+- 47d143c: Rename the personal agent category label to "AI agents".
+- ee47ba7: Strip adaptive thinking when Anthropic Messages requests are routed to Claude Haiku.
+- f4fb104: Preserve OpenCode Go reasoning content for known non-DeepSeek reasoning model families.
+
+## 6.3.0
+
+### Minor Changes
+
+- 74f6fb3: Add `GET /api/v1/public/agent-tokens` public endpoint. Mirrors the shape of `/provider-tokens` but groups daily-token usage by `(agent_category, agent_platform)` instead of by LLM provider, so the marketing site can show per-agent (OpenClaw, Claude Code, OpenAI SDK, etc.) charts alongside the existing per-provider ones. Excludes the `other` platform bucket and `custom:*` models server-side. Gated by `MANIFEST_PUBLIC_STATS` and cached for 24h, same posture as the rest of the public-stats endpoints.
+
+### Patch Changes
+
+- c1fe19a: Fix GitHub Copilot routing for GPT-5 Codex models. Copilot serves Codex variants (`gpt-5-codex`, `gpt-5.2-codex`, `gpt-5.3-codex`) only via `/responses`, so chat-completions requests now swap to that endpoint instead of returning "Unsupported API for model". Also rewrites `max_tokens` to `max_completion_tokens` for the GPT-5 / o-series family on Copilot, fixing the "Unsupported parameter: 'max_tokens'" error reported alongside.
+- 786dd76: Preserve Responses stream classification during stream warm-up.
+- ae56a30: fix(proxy): preserve Anthropic server tools through /v1/messages double-conversion (#1886)
+
+  Claude Code requests routed through `POST /v1/messages` to an Anthropic upstream
+  failed with `tools.N.custom.input_schema: Field required` because server tools
+  (web_search, bash, text_editor, computer, code_execution) lost their `type` tag
+  during the Anthropic → OpenAI → Anthropic translation and were re-emitted as
+  custom tools missing the required `input_schema`. Server tools are now stashed
+  on the translated body and re-emitted unchanged when the upstream is Anthropic.
+
+- d25320a: Preserve DeepSeek `reasoning_content` on every follow-up turn, regardless of which provider proxies it (OpenCode Go, custom providers, future aggregators). Fixes a hard failure on OpenCode Go's `deepseek-v4-pro` ("The reasoning_content in the thinking mode must be passed back to the API") — issue #1862.
+- e7cdfa1: Strip the non-standard `ref` JSON Schema keyword (no `$` prefix) from Google Gemini tool parameters. Some tool emitters drop the `$` prefix because Protobuf and similar parsers reject dollar-prefixed field names; without this fix Manifest forwarded `ref` verbatim and Google rejected the request with `Invalid JSON payload received. Unknown name "ref"`.
+- f21584a: Fix prompt-caching token counters on `/v1/messages`. `cache_control` markers always reached Anthropic (caching was working server-side), but the chat → Anthropic-Messages conversion in `toAnthropicUsage` hardcoded `cache_creation_input_tokens: 0`, and the `parseUsageObject` Anthropic branch read cache reads from the wrong key. Result: client responses lost cache creation counts, and `agent_messages` rows recorded `0` for both cache creation and cache reads even when Anthropic actually hit the cache.
+
+  Also fixes the recorder's duplicate-write detector, which summed `input_tokens + cache_read_tokens + cache_creation_tokens` when computing a row's total prompt tokens — `input_tokens` already stored the chat-shape total, so the sum double-counted caches and caused legitimate duplicates to bypass dedup. And `toAnthropicUsage` now reads OpenAI-compat nested `prompt_tokens_details.cached_tokens` as a fallback so `/v1/messages` requests routed to OpenAI / DeepSeek / Z.AI / MiniMax / Mistral surface their cached-input counts too.
+
+- 9f64594: Update MiniMax "Where to get an API key" link to point to the actual key page (`/user-center/basic-information/interface-key`) instead of the API docs overview.
+
+## 6.2.2
+
+### Patch Changes
+
+- 562d105: Fix Groq model attribution in the routing UI so Groq-served prefixed model IDs stay selectable and show the Groq provider.
+
+## 6.2.1
+
+### Patch Changes
+
+- 00784e3: Show the Model Parameters button on a routing tier when any route in the tier — primary or fallback — uses a params-compatible provider. Previously the button was gated to the primary route only, so a tier with DeepSeek configured as a fallback hid the toggle even though the proxy already applies tier-level `param_defaults` to whichever provider an attempt actually targets. The dialog's provider-default hint follows the first compatible route in the ordered (primary, …fallbacks) list.
+
+## 6.2.0
+
+### Minor Changes
+
+- ef46fa0: Per-assignment request body defaults: each tier and specificity slot now carries an optional `param_defaults` JSONB column that the proxy merges into the outbound provider request before forwarding. Initial knob is DeepSeek's thinking-mode toggle (`{ thinking: { type: 'enabled' | 'disabled' } }`) — fixes empty-content responses on DeepSeek V4 Flash/Pro that consume the `max_tokens` budget on reasoning. Precedence is presence-based: client-supplied fields in the request body always win, so explicit per-call overrides keep working.
+
+  Configure from the routing UI via a new "Parameters" button on each model chip; persisted via `PATCH /api/v1/routing/:agent/tiers/:tier/params` and `…/specificity/:category/params`.
+
+- 085431c: Per-message model parameter telemetry. Each `agent_messages` row now carries a `request_params` JSONB snapshot of the effective request body parameters that hit the provider (today: DeepSeek's `thinking` toggle; future provider knobs and user-defined custom-provider params land here without a schema change). The dashboard's expanded message detail shows a new "Model Parameters" accordion next to Request Headers, with an info tooltip explaining the field. Existing rows stay NULL — back-compat is preserved.
+- d3b551f: Per-provider model refresh: a small refresh button next to each provider in the Connect Providers detail view and next to each section header in the model picker. Toasts now report the actual count or upstream error instead of a blanket "Models refreshed" lie. Empty discovery results no longer wipe a non-empty cache, so a transient API hiccup can't silently empty the model list. The model picker subtitle now shows "Default tier" instead of just "tier".
+
+### Patch Changes
+
+- ec7fc12: Restore the per-tier (and per-specificity) Model Parameters dialog that was inadvertently dropped during a stacked-PR merge. The sliders icon is back on every primary model chip in Routing for providers that consume known params (today: DeepSeek's `thinking` toggle). The dialog persists per-assignment, so a single configured value applies to the primary model AND every fallback the proxy tries — without per-route schema changes. Multi-key compatible: pinning a different key on the same route does not affect the stored params, and switching keys mid-flight keeps using whatever the proxy resolved for that iteration.
+
+  Adds back: `PATCH /api/v1/routing/:agent/tiers/:tier/params`, `…/specificity/:category/params`, `TierService.setParamDefaults`, `SpecificityService.setParamDefaults`, frontend `setTierParamDefaults` / `setSpecificityParamDefaults`, and `ModelParamsDialog`.
+
+- c446856: fix(routing): attribute models by their connection's provider, not by model-id prefix
+
+  The routing UI used to derive a model's logo from the prefix of its model id,
+  which broke for any provider that redistributes other vendors' models. Most
+  visibly, a Groq connection serving `qwen/qwen3-32b` rendered with the Qwen
+  logo and Qwen-on-OpenRouter pricing (≈$0.08/$0.24 per 1M) instead of Groq's
+  own pricing ($0.29/$0.59).
+
+  Two changes:
+  - **Frontend** (`RoutingTierCard.providerIdForModel`): when a model row has a
+    stored `provider` that resolves to a registered first-party provider, that
+    wins over prefix inference. OpenRouter remains the documented exception
+    because its rows really do represent vendor-prefixed models served on behalf
+    of those vendors.
+  - **Backend** (`ModelDiscoveryService.enrichModel`): `known-model-prices.ts`
+    is now consulted _before_ models.dev and the OpenRouter cache, so curated
+    per-provider prices win over upstream catalogs that may attribute the same
+    model id to a different (cheaper) inference provider. Behaviour change for
+    the existing entries (moonshot-v1, gemma-3-1b-it, gemini-pro-latest): they
+    become authoritative instead of last-resort, which matches their intent.
+
+  Builds on #1772, which introduced `route.provider` as the routing identity.
+
+## 6.1.0
+
+### Minor Changes
+
+- ab9f0cb: Add an Anthropic Messages-compatible endpoint at `POST /v1/messages`. Anthropic SDK clients (Claude Code, `@anthropic-ai/sdk`) can now point `ANTHROPIC_BASE_URL` at a Manifest gateway and route through Manifest's tier/specificity pipeline like any OpenAI client. The implementation translates Anthropic Messages requests into the internal chat-completions form (and back on the response side), reusing the existing routing, scoring, fallback, and recording machinery.
+- 1627493: Add a "Coding Assistant" category in the agent picker and move Claude Code into it. The Connect Agent / Change Agent Type modal now shows three columns instead of two: Personal AI Agent | App AI SDK | Coding Assistant. Claude Code is no longer mis-bucketed under personal agents — it sits in the new column with the existing copper-orange Claude mark. Picker order, icons, and the existing Claude Code setup wizard are unchanged.
+- fb7d921: Add support for multiple API keys per provider per agent. Users with several accounts for the same provider (a personal + work OpenAI key, two ChatGPT Plus subscriptions, two Anthropic Pro tokens) can attach all credentials and pin specific tiers or fallback rows to a specific labeled key. Multi-key applies to both `api_key` and `subscription` providers; local providers (Ollama, LM Studio) stay single-row since they don't carry credentials. Cap is 5 active keys per (agent, provider, auth_type). Single-key users see no UI change — the chip + "+ Add another key" affordance only appear once a provider has 2+ active keys.
+- c6efb87: Add Wingman, an in-dashboard gateway tester for contributors. Embedded as a half-screen iframe drawer behind a floating action button in dev mode, stripped from Docker / cloud bundles. Lets contributors send one-shot requests at the gateway while impersonating OpenClaw, Hermes, OpenAI SDK, Vercel AI SDK, LangChain, cURL, or Raw — with editable code panels that actually execute via stubbed SDKs.
+
+### Patch Changes
+
+- 9a0e8c3: Fix silent failure when adding a fallback that shares a provider with an existing route. Adding an OpenAI API key model as a fallback to an OpenAI subscription model (or any other same-provider, different-auth combination) now persists correctly instead of showing a success toast and dropping the change. The frontend now sends the explicit `(provider, authType, model)` tuple alongside the model name so the backend can disambiguate when the same model id is offered by two connected providers. Affects both complexity tier and specificity ("custom") routing.
+- 30d19ab: Stop silently wiping the saved fallback list when an unresolvable model is added (issue #1790).
+
+  `buildFallbackRoutes()` in `tier`, `specificity`, and `header-tier` services used to return `null` whenever any single model couldn't be resolved to a unique `(provider, authType, model)` tuple. `setFallbacks` then persisted that `null`, so the user's existing `fallback_routes` row was overwritten with `null` and the controller returned `[]`. The toast still said "Fallback added" — the only visible result was the previously-saved fallbacks disappearing.
+
+  PR #1825 already plugged the most common trigger by sending an explicit `routes` payload from the add handlers. This change removes the underlying footgun: `buildFallbackRoutes` now throws `400 Bad Request` instead of returning `null`, so the row is left untouched on resolution failure and the frontend shows the error.
+
+  Scoped strictly to the backend wipe path. Does not change input validation, the `authType !== undefined` guard in the add handlers, or the discovery-fallback shape of `buildFallbackRoutes`.
+
+- 022529a: Fix MiniMax Token Plan activation redirecting to the homepage. The MiniMax `/oauth/code` endpoint returns a `verification_uri` pointing at `https://www.minimax.io/oauth-authorize?...`, which 307-redirects to the homepage with no instructions. The real authorize page lives on `platform.minimax.io` (and `platform.minimaxi.com` for the CN region). The MiniMax OAuth start flow now rewrites the host before returning the URI, so users land on the actual page where their 6-digit code can be entered. Closes #1796.
+
+## 6.0.2
+
+### Patch Changes
+
+- cf98f70: Fix OpenAI subscription model discovery so newer Codex CLI models (e.g. `gpt-5.5`) appear. The hardcoded `client_version=0.99.0` query param made `https://chatgpt.com/backend-api/codex/models` silently return only the older subset; bump it to `0.128.0` and lift Codex/Copilot client identifiers into a shared constants file so future bumps are a one-line change.
+- a7a9c3b: Fix fallback success rows recording the primary route's `auth_type` instead of the fallback's, which caused `cost_usd` to be miscomputed on mixed-auth chains (subscription fallbacks were charged, api_key fallbacks were stored as $0).
+- be679c4: Strip Codex-unsupported parameters on the OpenAI subscription proxy path. Requests forwarded to `chatgpt.com/backend-api/codex/responses` now drop `temperature`, `top_p`, `max_output_tokens`, `metadata`, `safety_identifier`, `prompt_cache_retention`, and `truncation` before the upstream call, and force `store: false`. Previously these fields propagated through and Codex returned `400 unsupported_parameter`, breaking OpenAI-SDK clients that set sampling defaults. Closes #1791.
+
+## 6.0.1
+
+### Patch Changes
+
+- e8162c3: Security hardening across the build pipeline and runtime: every GitHub Action is now pinned by commit SHA, the awesome-free-llm-apis data feed is pinned to an immutable commit and validated for HTTPS shape before render, the encryption-key cache no longer keeps the raw secret as a Map key, the Google Gemini API key moves from `?key=` query param to the `x-goog-api-key` header (so it stays out of upstream proxy/LB access logs), OpenAI OAuth error logs run through `scrubSecrets`, the OAuth `backendUrl` now prefers `BETTER_AUTH_URL` over the request `Host` header, the dev-loopback agent fallback prefers the seeded tenant over picking the first active key, rejected agent keys log only the fixed `mnfst_` prefix, and migrations log via the TypeORM logger instead of `console.log`. `npm audit fix` resolved vite + postcss CVEs. A boot-time check counts active legacy static-salt API-key hashes and warns if any remain (no forced rotation). `MANIFEST_ENCRYPTION_KEY` is now documented and threaded through `docker-compose.yml`; if unset the runtime still falls back to `BETTER_AUTH_SECRET`.
+- f0082d5: Fix: detect Podman and Kubernetes as self-hosted runtimes. Manifest now reads `/run/.containerenv` (Podman) and `KUBERNETES_SERVICE_HOST` in addition to `/.dockerenv`, so rootless Podman and Kubernetes installs no longer fall back to cloud-mode SSRF rules and reject `http://` URLs to local LLM servers.
+
+  Also narrows the cloud-metadata SSRF block to the actual IMDS addresses (`169.254.169.254`, `169.254.169.253`, `100.100.100.200`, `fd00:ec2::254`) instead of the entire `169.254.0.0/16` link-local range, so self-hosted users can reach `host.containers.internal` (which Podman maps to `169.254.x.y` under pasta/slirp4netns). Cloud mode is unchanged: link-local space is still rejected via the private-IP guard.
+
 ## 6.0.0
 
 ### Major Changes

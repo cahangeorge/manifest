@@ -56,6 +56,10 @@ export interface MessageDetailResponse {
     specificity_category: string | null;
     specificity_miscategorized: boolean;
     auth_type: string | null;
+    /** Provider-key label that handled the request, when the user has 2+
+     *  keys configured for (provider, auth_type). `null` (or `'Default'` in
+     *  the legacy single-key case) means the priority-0 key was used. */
+    provider_key_label: string | null;
     skill_name: string | null;
     fallback_from_model: string | null;
     fallback_index: number | null;
@@ -64,6 +68,16 @@ export interface MessageDetailResponse {
     feedback_tags: string[] | null;
     feedback_details: string | null;
     request_headers: Record<string, string> | null;
+    /**
+     * Per-message snapshot of effective model parameters merged into the
+     * outbound provider request (today: `{ thinking: { type: 'enabled' |
+     * 'disabled' } }` for DeepSeek; future provider knobs append here as
+     * keys are added to `RequestParamDefaults` in `manifest-shared`). The
+     * `unknown` value type lets the dashboard render arbitrary shapes
+     * (incl. forthcoming user-defined custom-provider params) without a
+     * frontend release per knob.
+     */
+    request_params: { [key: string]: unknown } | null;
     header_tier_id: string | null;
     header_tier_name: string | null;
     header_tier_color: string | null;
@@ -95,6 +109,7 @@ export function getMessages(
     agent_name?: string;
     cost_min?: string;
     cost_max?: string;
+    routing_tier?: string;
   } = {},
 ) {
   return fetchJson('/messages', params);

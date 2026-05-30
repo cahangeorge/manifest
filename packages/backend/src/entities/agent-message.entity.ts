@@ -1,6 +1,7 @@
 import { Entity, Column, PrimaryColumn, Index } from 'typeorm';
 import { timestampType } from '../common/utils/postgres-sql';
 import type { CallerAttribution } from '../routing/proxy/caller-classifier';
+import type { RequestParamDefaults } from 'manifest-shared';
 
 @Entity('agent_messages')
 @Index(['tenant_id', 'agent_id', 'timestamp'])
@@ -113,6 +114,9 @@ export class AgentMessage {
   @Column('simple-json', { nullable: true })
   request_headers!: Record<string, string> | null;
 
+  @Column('jsonb', { nullable: true })
+  request_params!: RequestParamDefaults | null;
+
   @Column('varchar', { nullable: true })
   header_tier_id!: string | null;
 
@@ -130,4 +134,7 @@ export class AgentMessage {
 
   @Column('text', { nullable: true })
   feedback_details!: string | null;
+
+  @Column('varchar', { nullable: true })
+  provider_key_label!: string | null;
 }

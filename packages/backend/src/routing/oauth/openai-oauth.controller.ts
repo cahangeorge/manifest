@@ -10,6 +10,7 @@ import {
   HttpException,
   HttpStatus,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomBytes } from 'crypto';
 import { Request, Response } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
@@ -19,6 +20,7 @@ import { OpenaiOauthService, OAuthTokenBlob, oauthDoneHtml } from './openai-oaut
 import { ResolveAgentService } from '../routing-core/resolve-agent.service';
 import { ProviderService } from '../routing-core/provider.service';
 import { ProviderKeyService } from '../routing-core/provider-key.service';
+import { optionalTrimmedStringQuery } from './query-params';
 
 @Controller('api/v1/oauth/openai')
 export class OpenaiOauthController {
@@ -29,6 +31,7 @@ export class OpenaiOauthController {
     private readonly resolveAgent: ResolveAgentService,
     private readonly providerKeyService: ProviderKeyService,
     private readonly providerService: ProviderService,
+    private readonly configService: ConfigService,
   ) {}
 
   /**
@@ -46,7 +49,11 @@ export class OpenaiOauthController {
       throw new HttpException('agentName query parameter is required', HttpStatus.BAD_REQUEST);
     }
     const agent = await this.resolveAgent.resolve(user.id, agentName);
-    const backendUrl = `${req.protocol}://${req.get('host')}`;
+    // Prefer the operator-configured BETTER_AUTH_URL so a forged Host header
+    // can't redirect the OAuth flow. Fall back to the request's host:port for
+    // the dev case where BETTER_AUTH_URL isn't set.
+    const trustedBackendUrl = this.configService.get<string>('BETTER_AUTH_URL');
+    const backendUrl = trustedBackendUrl || `${req.protocol}://${req.get('host')}`;
     try {
       const url = await this.oauthService.generateAuthorizationUrl(agent.id, user.id, backendUrl);
       return { url };
@@ -57,23 +64,28 @@ export class OpenaiOauthController {
   }
 
   /**
-   * Revoke the stored OpenAI OAuth token (best-effort) and disconnect the provider.
+   * Revoke stored OpenAI OAuth token(s) (best-effort) and disconnect the provider.
    */
   @Post('revoke')
-  async revoke(@Query('agentName') agentName: string, @CurrentUser() user: AuthUser) {
+  async revoke(
+    @Query('agentName') agentName: string,
+    @Query('label') label: string | string[] | undefined,
+    @CurrentUser() user: AuthUser,
+  ) {
     if (!agentName) {
       throw new HttpException('agentName query parameter is required', HttpStatus.BAD_REQUEST);
     }
+    const keyLabel = optionalTrimmedStringQuery(label, 'label');
     const agent = await this.resolveAgent.resolve(user.id, agentName);
-    const apiKey = await this.providerKeyService.getProviderApiKey(
-      agent.id,
-      'openai',
-      'subscription',
-    );
+    const keys = await this.providerKeyService.getProviderKeys(agent.id, 'openai', 'subscription');
+    const keysToRevoke = keyLabel
+      ? keys.filter((key) => key.label.toLowerCase() === keyLabel.toLowerCase())
+      : keys;
 
-    if (apiKey) {
+    for (const key of keysToRevoke) {
+      if (!key.apiKey) continue;
       try {
-        const blob = JSON.parse(apiKey) as OAuthTokenBlob;
+        const blob = JSON.parse(key.apiKey) as OAuthTokenBlob;
         if (blob.t) await this.oauthService.revokeToken(blob.t);
         if (blob.r) await this.oauthService.revokeToken(blob.r);
       } catch {
@@ -81,9 +93,14 @@ export class OpenaiOauthController {
       }
     }
 
-    await this.providerService.removeProvider(agent.id, 'openai', 'subscription');
+    const { notifications } = await this.providerService.removeProvider(
+      agent.id,
+      'openai',
+      'subscription',
+      keyLabel,
+    );
 
-    return { ok: true };
+    return { ok: true, notifications };
   }
 
   /**

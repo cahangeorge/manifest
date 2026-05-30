@@ -591,17 +591,17 @@ describe("MessageLog", () => {
     };
 
     it("renders custom provider icon in message rows", async () => {
-      mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Groq" }]);
+      mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Cerebras" }]);
       mockGetMessages.mockResolvedValue(customMessagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
-        const img = container.querySelector('img[alt="Groq"]');
+        const img = container.querySelector('img[alt="Cerebras"]');
         expect(img).not.toBeNull();
       });
     });
 
     it("strips custom prefix from model name display", async () => {
-      mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Groq" }]);
+      mockGetCustomProviders.mockResolvedValue([{ id: "abc-123", name: "Cerebras" }]);
       mockGetMessages.mockResolvedValue(customMessagesData);
       const { container } = render(() => <MessageLog />);
       await vi.waitFor(() => {
@@ -1009,6 +1009,43 @@ describe("MessageLog", () => {
       fireEvent.click(likeBtn);
       await vi.waitFor(() => {
         expect(container.querySelector(".feedback-btn--active-like")).not.toBeNull();
+      });
+    });
+  });
+
+  describe("Tier filter", () => {
+    it("renders a Tier select with Playground among the options", async () => {
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        const selects = container.querySelectorAll('[data-testid="select"]');
+        expect(selects.length).toBeGreaterThanOrEqual(2);
+      });
+      const selects = container.querySelectorAll('[data-testid="select"]');
+      // Second Select is the tier filter (first is providers).
+      const tierSelect = selects[1] as HTMLSelectElement;
+      expect(tierSelect.textContent).toContain("All tiers");
+      expect(tierSelect.textContent).toContain("Playground");
+      expect(tierSelect.textContent).toContain("Simple");
+    });
+
+    it("sends routing_tier in the query when a tier is selected", async () => {
+      mockGetMessages.mockResolvedValue(messagesData);
+      const { container } = render(() => <MessageLog />);
+      await vi.waitFor(() => {
+        expect(container.querySelectorAll('[data-testid="select"]').length).toBeGreaterThanOrEqual(
+          2,
+        );
+      });
+      const tierSelect = container.querySelectorAll(
+        '[data-testid="select"]',
+      )[1] as HTMLSelectElement;
+      mockGetMessages.mockClear();
+      fireEvent.change(tierSelect, { target: { value: "playground" } });
+      await vi.waitFor(() => {
+        const calls = mockGetMessages.mock.calls;
+        const lastQ = calls[calls.length - 1]?.[0] ?? {};
+        expect(lastQ.routing_tier).toBe("playground");
       });
     });
   });

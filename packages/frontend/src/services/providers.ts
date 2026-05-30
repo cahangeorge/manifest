@@ -31,7 +31,18 @@ export interface ProviderDef {
   /** Provider uses GitHub device login instead of token paste. */
   deviceLogin?: boolean;
   /** UI auth mode for subscription flows. */
-  subscriptionAuthMode?: 'popup_oauth' | 'device_code' | 'token';
+  subscriptionAuthMode?: 'popup_oauth' | 'popup_paste' | 'device_code' | 'token';
+  /**
+   * Optional secondary subscription path. Lets a provider expose a pasted-token
+   * shortcut alongside its primary OAuth/device-code flow — currently used so
+   * MiniMax users can connect their Coding Plan via an `sk-cp-` token without
+   * going through the device-code popup.
+   */
+  subscriptionTokenAlternative?: {
+    prefix: string;
+    placeholder: string;
+    dividerLabel: string;
+  };
   /** Provider is subscription-only and should not appear in the API Keys tab. */
   subscriptionOnly?: boolean;
   /** External URL the user should open to sign in and retrieve their token (token mode). */
@@ -64,7 +75,12 @@ interface ProviderUIOverlay {
   subscriptionCredentialKind?: 'setup-token' | 'api-key';
   subscriptionCommand?: string;
   deviceLogin?: boolean;
-  subscriptionAuthMode?: 'popup_oauth' | 'device_code' | 'token';
+  subscriptionAuthMode?: 'popup_oauth' | 'popup_paste' | 'device_code' | 'token';
+  subscriptionTokenAlternative?: {
+    prefix: string;
+    placeholder: string;
+    dividerLabel: string;
+  };
   subscriptionOnly?: boolean;
   subscriptionSignInUrl?: string;
   subscriptionSignInLabel?: string;
@@ -85,9 +101,7 @@ const PROVIDER_UI: Record<string, ProviderUIOverlay> = {
     subtitle: 'Claude Opus 4, Sonnet 4.5, Haiku',
     supportsSubscription: true,
     subscriptionLabel: 'Claude Max / Pro subscription',
-    subscriptionAuthMode: 'token',
-    subscriptionKeyPlaceholder: 'Paste your setup-token',
-    subscriptionCommand: 'claude setup-token',
+    subscriptionAuthMode: 'popup_paste',
     models: [],
   },
   deepseek: {
@@ -122,6 +136,11 @@ const PROVIDER_UI: Record<string, ProviderUIOverlay> = {
     subtitle: 'Gemini 2.5, Gemini 2.0 Flash',
     models: [],
   },
+  groq: {
+    initial: 'Gq',
+    subtitle: 'Llama, Gemma, Mixtral — fast inference',
+    models: [],
+  },
   llamacpp: {
     initial: 'Lc',
     subtitle: 'OpenAI-compatible server for GGUF models on CPU / Metal / CUDA',
@@ -142,6 +161,11 @@ const PROVIDER_UI: Record<string, ProviderUIOverlay> = {
     supportsSubscription: true,
     subscriptionLabel: 'MiniMax Coding Plan',
     subscriptionAuthMode: 'device_code',
+    subscriptionTokenAlternative: {
+      prefix: 'sk-cp-',
+      placeholder: 'sk-cp-...',
+      dividerLabel: 'Or paste your Coding Plan token',
+    },
     models: [],
   },
   mistral: {
@@ -257,6 +281,7 @@ const PROVIDER_ORDER = [
   'deepseek',
   'copilot',
   'gemini',
+  'groq',
   'llamacpp',
   'lmstudio',
   'minimax',
@@ -291,7 +316,7 @@ export interface StageDef {
 export const DEFAULT_STAGE: StageDef = {
   id: 'default',
   step: 0,
-  label: 'Regular',
+  label: 'Default',
   desc: 'Handles every request.',
 };
 

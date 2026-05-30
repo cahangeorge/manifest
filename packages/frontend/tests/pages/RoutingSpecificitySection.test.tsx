@@ -54,6 +54,10 @@ vi.mock("../../src/pages/RoutingTierCard.js", () => ({
       props.connectedProviders,
       props.persistFallbacks,
       props.persistClearFallbacks,
+      props.persistParamDefaults,
+      props.onParamDefaultsSaved,
+      props.getModelParams,
+      props.setModelParams,
     ];
     void _read;
     return (
@@ -110,6 +114,8 @@ function makeProps(
     onAddFallback: vi.fn(),
     refetchAll: vi.fn().mockResolvedValue(undefined),
     refetchSpecificity: vi.fn().mockResolvedValue(undefined),
+    getModelParams: () => null,
+    setModelParams: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -267,9 +273,11 @@ describe("RoutingSpecificitySection", () => {
       a: string,
       c: string,
       m: string[],
+      r?: { provider: string; authType: string; model: string }[],
     ) => Promise<unknown>;
-    await persist("demo", "coding", ["m1"]);
-    expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith("demo", "coding", ["m1"]);
+    const routes = [{ provider: "openai", authType: "api_key", model: "m1" }];
+    await persist("demo", "coding", ["m1"], routes);
+    expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith("demo", "coding", ["m1"], routes);
   });
 
   it("forwards persistClearFallbacks to clearSpecificityFallbacks via the tier card", async () => {

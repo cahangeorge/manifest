@@ -3,6 +3,7 @@ import type {
   AuthType,
   AvailableModel,
   CustomProviderData,
+  RequestParamDefaults,
   RoutingProvider,
   TierAssignment,
 } from '../services/api.js';
@@ -23,6 +24,12 @@ export interface RoutingDefaultTierSectionProps {
   addingFallback: () => string | null;
   onDropdownOpen: (tierId: string) => void;
   onOverride: (tierId: string, model: string, provider: string, authType?: AuthType) => void;
+  onPinKey: (
+    tierId: string,
+    providerId: string,
+    providerKeyLabel: string | null,
+    authType?: AuthType,
+  ) => void;
   onReset: (tierId: string) => void;
   onFallbackUpdate: (tierId: string, fallbacks: string[]) => void;
   onAddFallback: (tierId: string) => void;
@@ -32,6 +39,27 @@ export interface RoutingDefaultTierSectionProps {
   togglingComplexity: () => boolean;
   onToggleComplexity: () => void;
   embedded?: boolean;
+  /**
+   * Read saved per-route params from the parent's loaded map. Threaded
+   * down to every model row across the tier card + fallback list so each
+   * affordance shows the configured-state badge without per-row fetches.
+   */
+  getModelParams?: (
+    provider: string,
+    authType: AuthType,
+    model: string,
+  ) => RequestParamDefaults | null;
+  /**
+   * Persist new params for a single route. Parent is responsible for the
+   * server call and the local cache update; this section just threads the
+   * callback down to the affordance.
+   */
+  setModelParams?: (
+    provider: string,
+    authType: AuthType,
+    model: string,
+    params: RequestParamDefaults | null,
+  ) => Promise<unknown>;
 }
 
 const RoutingDefaultTierSection: Component<RoutingDefaultTierSectionProps> = (props) => {
@@ -57,11 +85,14 @@ const RoutingDefaultTierSection: Component<RoutingDefaultTierSectionProps> = (pr
         agentName={props.agentName}
         onDropdownOpen={props.onDropdownOpen}
         onOverride={props.onOverride}
+        onPinKey={props.onPinKey}
         onReset={props.onReset}
         onFallbackUpdate={props.onFallbackUpdate}
         onAddFallback={props.onAddFallback}
         getFallbacksFor={props.getFallbacksFor}
         connectedProviders={props.connectedProviders}
+        getModelParams={props.getModelParams}
+        setModelParams={props.setModelParams}
       />
     </div>
   );
@@ -84,11 +115,14 @@ const RoutingDefaultTierSection: Component<RoutingDefaultTierSectionProps> = (pr
             agentName={props.agentName}
             onDropdownOpen={props.onDropdownOpen}
             onOverride={props.onOverride}
+            onPinKey={props.onPinKey}
             onReset={props.onReset}
             onFallbackUpdate={props.onFallbackUpdate}
             onAddFallback={props.onAddFallback}
             getFallbacksFor={props.getFallbacksFor}
             connectedProviders={props.connectedProviders}
+            getModelParams={props.getModelParams}
+            setModelParams={props.setModelParams}
           />
         )}
       </For>

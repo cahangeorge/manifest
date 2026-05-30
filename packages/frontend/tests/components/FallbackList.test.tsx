@@ -33,6 +33,7 @@ vi.mock("../../src/services/providers.js", () => ({
 vi.mock("../../src/services/routing-utils.js", () => ({
   resolveProviderId: (p: string) => p.toLowerCase(),
   stripCustomPrefix: (m: string) => m.replace(/^custom:[^/]+\//, ""),
+  usedKeyLabelsForModelInTier: () => new Set<string>(),
 }));
 
 vi.mock("../../src/services/provider-utils.js", () => ({
@@ -885,5 +886,274 @@ describe("FallbackList", () => {
     fireEvent.dragEnd(list);
 
     expect(onFallbackDragEnd).toHaveBeenCalled();
+  });
+
+  describe("multi-key chip", () => {
+    const multiKeyProps = {
+      ...defaultProps,
+      connectedProviders: [
+        {
+          id: "p1",
+          provider: "openai",
+          auth_type: "api_key",
+          is_active: true,
+          has_api_key: true,
+          label: "Personal",
+          priority: 0,
+          key_prefix: "sk-pers-",
+        },
+        {
+          id: "p2",
+          provider: "openai",
+          auth_type: "api_key",
+          is_active: true,
+          has_api_key: true,
+          label: "Work",
+          priority: 1,
+          key_prefix: "sk-work-",
+        },
+      ] as any[],
+    };
+
+    it("hides the chip when only one key is connected", () => {
+      const { queryByLabelText } = render(() => (
+        <FallbackList {...defaultProps} fallbacks={["model-a"]} />
+      ));
+      expect(queryByLabelText(/API key for/i)).toBeNull();
+    });
+
+    it("renders the chip on the row when 2+ keys exist for the resolved provider", () => {
+      const { getByLabelText } = render(() => (
+        <FallbackList {...multiKeyProps} fallbacks={["model-a"]} />
+      ));
+      expect(getByLabelText(/API key for/i)).toBeDefined();
+    });
+
+    it("shows the pinned label from the structured fallbackRoutes entry", () => {
+      // Multi-key pin now lives in the structured `fallbackRoutes[i].keyLabel`
+      // rather than the legacy `||<label>` suffix on the model string.
+      const { container } = render(() => (
+        <FallbackList
+          {...multiKeyProps}
+          fallbacks={["model-a"]}
+          fallbackRoutes={[
+            { provider: "openai", authType: "api_key", model: "model-a", keyLabel: "Work" },
+          ] as any}
+        />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLElement;
+      expect(chip).not.toBeNull();
+      expect(chip.textContent).toContain("Work");
+    });
+
+    it("falls back to the first key's label when nothing is pinned", () => {
+      const { container } = render(() => (
+        <FallbackList {...multiKeyProps} fallbacks={["model-a"]} />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLElement;
+      expect(chip.textContent).toContain("Personal");
+    });
+
+    it("renders a Clear pin option when the row is currently pinned", () => {
+      const { container, getByText } = render(() => (
+        <FallbackList
+          {...multiKeyProps}
+          fallbacks={["model-a"]}
+          fallbackRoutes={[
+            { provider: "openai", authType: "api_key", model: "model-a", keyLabel: "Work" },
+          ] as any}
+        />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLButtonElement;
+      fireEvent.click(chip);
+      expect(getByText("Clear pin")).toBeDefined();
+    });
+
+    it("does not render Clear pin when no label is currently set", () => {
+      const { container, queryByText } = render(() => (
+        <FallbackList {...multiKeyProps} fallbacks={["model-a"]} />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLButtonElement;
+      fireEvent.click(chip);
+      expect(queryByText("Clear pin")).toBeNull();
+    });
+
+    it("Clear pin nulls the keyLabel on the structured route and persists", async () => {
+      // After the merge, "Clear pin" no longer rewrites the model string —
+      // it sets `route.keyLabel` to null on the matching `fallbackRoutes`
+      // entry and forwards that structure to setFallbacks.
+      const onUpdate = vi.fn();
+      const initialRoutes = [
+        { provider: "openai", authType: "api_key", model: "model-a", keyLabel: "Work" },
+      ];
+      const { container, getByText } = render(() => (
+        <FallbackList
+          {...multiKeyProps}
+          fallbacks={["model-a"]}
+          fallbackRoutes={initialRoutes as any}
+          onUpdate={onUpdate}
+        />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLButtonElement;
+      fireEvent.click(chip);
+      fireEvent.click(getByText("Clear pin"));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onUpdate).toHaveBeenCalledWith(
+        ["model-a"],
+        [{ provider: "openai", authType: "api_key", model: "model-a", keyLabel: null }],
+      );
+      expect(mockSetFallbacks).toHaveBeenCalledWith(
+        "test-agent",
+        "tier-1",
+        ["model-a"],
+        [{ provider: "openai", authType: "api_key", model: "model-a", keyLabel: null }],
+      );
+    });
+
+    it("opens the listbox and persists a new label via setFallbacks", async () => {
+      // Picking a key now writes the label into `route.keyLabel` of the
+      // structured fallbackRoutes entry; the model name stays bare.
+      const onUpdate = vi.fn();
+      const initialRoutes = [
+        { provider: "openai", authType: "api_key", model: "model-a", keyLabel: null },
+      ];
+      const { container, getByText } = render(() => (
+        <FallbackList
+          {...multiKeyProps}
+          fallbacks={["model-a"]}
+          fallbackRoutes={initialRoutes as any}
+          onUpdate={onUpdate}
+        />
+      ));
+      const chip = container.querySelector(".fallback-list__key-chip") as HTMLButtonElement;
+      fireEvent.click(chip);
+      // Listbox is now visible.
+      expect(container.querySelector('ul[role="listbox"]')).toBeDefined();
+      fireEvent.click(getByText("Work"));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(onUpdate).toHaveBeenCalledWith(
+        ["model-a"],
+        [{ provider: "openai", authType: "api_key", model: "model-a", keyLabel: "Work" }],
+      );
+      expect(mockSetFallbacks).toHaveBeenCalledWith(
+        "test-agent",
+        "tier-1",
+        ["model-a"],
+        [{ provider: "openai", authType: "api_key", model: "model-a", keyLabel: "Work" }],
+      );
+    });
+  });
+
+  describe("per-row params affordance", () => {
+    const deepseekRoute = {
+      provider: "deepseek",
+      authType: "api_key" as const,
+      model: "deepseek-v4-flash",
+      keyLabel: null,
+    };
+    const openaiRoute = {
+      provider: "openai",
+      authType: "api_key" as const,
+      model: "gpt-4o",
+      keyLabel: null,
+    };
+
+    it("renders the params affordance on a fallback row and forwards saves through setModelParams", async () => {
+      const setModelParams = vi.fn().mockResolvedValue(undefined);
+      const getModelParams = vi.fn().mockReturnValue(null);
+      const { container, getByRole } = render(() => (
+        <FallbackList
+          {...defaultProps}
+          fallbacks={["deepseek-v4-flash"]}
+          fallbackRoutes={[deepseekRoute] as any}
+          getModelParams={getModelParams}
+          setModelParams={setModelParams}
+        />
+      ));
+      const btn = Array.from(
+        container.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((b) => b.getAttribute("aria-label")?.startsWith("Configure model parameters"));
+      expect(btn).toBeDefined();
+      // Open dialog and save to evaluate the parent's `setParams={...}` JSX
+      // attribute (Solid lazily reads child props — `setParams` only fires
+      // when the affordance calls it on save).
+      fireEvent.click(btn!);
+      const toggle = await waitFor(() =>
+        getByRole("button", { name: /Thinking mode/ }),
+      );
+      fireEvent.click(toggle);
+      fireEvent.click(getByRole("button", { name: "Save" }));
+      await waitFor(() => {
+        expect(setModelParams).toHaveBeenCalled();
+      });
+    });
+
+    it("does NOT render the affordance when the row's provider has no known param key", () => {
+      const { container } = render(() => (
+        <FallbackList
+          {...defaultProps}
+          fallbacks={["gpt-4o"]}
+          fallbackRoutes={[openaiRoute] as any}
+          getModelParams={vi.fn().mockReturnValue(null)}
+          setModelParams={vi.fn()}
+        />
+      ));
+      const btn = Array.from(
+        container.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((b) => b.getAttribute("aria-label")?.startsWith("Configure model parameters"));
+      expect(btn).toBeUndefined();
+    });
+
+    it("does NOT render the affordance when the params callbacks are undefined", () => {
+      const { container } = render(() => (
+        <FallbackList
+          {...defaultProps}
+          fallbacks={["deepseek-v4-flash"]}
+          fallbackRoutes={[deepseekRoute] as any}
+        />
+      ));
+      const btn = Array.from(
+        container.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((b) => b.getAttribute("aria-label")?.startsWith("Configure model parameters"));
+      expect(btn).toBeUndefined();
+    });
+
+    it("renders the affordance on the legacy path when both the model catalog AND a matching connected provider supply the auth_type", () => {
+      // Legacy / pre-backfill data path: structured routes are not available
+      // yet, but the row's provider can still be resolved via the model
+      // catalog AND the connected providers list. The affordance needs
+      // `authType` to call /model-params, so both signals are required.
+      const modelsWithDeepseek = [
+        ...models,
+        { model_name: "deepseek-v4-flash", provider: "DeepSeek" },
+      ] as any[];
+      const connectedProvidersWithDeepseek = [
+        {
+          id: "p-ds",
+          provider: "deepseek",
+          auth_type: "api_key",
+          is_active: true,
+          has_api_key: true,
+          connected_at: "2025-01-01",
+        },
+      ] as any[];
+      const { container } = render(() => (
+        <FallbackList
+          {...defaultProps}
+          models={modelsWithDeepseek}
+          connectedProviders={connectedProvidersWithDeepseek}
+          fallbacks={["deepseek-v4-flash"]}
+          fallbackRoutes={null}
+          getModelParams={vi.fn().mockReturnValue(null)}
+          setModelParams={vi.fn()}
+        />
+      ));
+      const btn = Array.from(
+        container.querySelectorAll<HTMLButtonElement>("button"),
+      ).find((b) => b.getAttribute("aria-label")?.startsWith("Configure model parameters"));
+      expect(btn).toBeDefined();
+    });
   });
 });

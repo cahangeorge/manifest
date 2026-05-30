@@ -17,7 +17,7 @@
 
 ## What is Manifest?
 
-Manifest is a smart model router for **personal AI agents** like OpenClaw, Hermes, or anything speaking the OpenAI-compatible HTTP API. It sits between your agent and your LLM providers, scores each request, and routes it to the cheapest model that can handle it. Simple questions go to fast, cheap models. Hard problems go to expensive ones. You save money without thinking about it.
+Manifest is a smart model router for **AI agents** like OpenClaw, Hermes, or anything speaking the OpenAI-compatible HTTP API. It sits between your agent and your LLM providers, scores each request, and routes it to the cheapest model that can handle it. Simple questions go to fast, cheap models. Hard problems go to expensive ones. You save money without thinking about it.
 
 - Route requests to the right model: cut costs up to 70%
 - Automatic fallbacks: if a model fails, the next one picks up
@@ -330,6 +330,19 @@ For vLLM, text-generation-webui, TogetherAI proxies, Azure OpenAI gateways, or a
 ### Running Ollama on another machine
 
 If Ollama runs on a different host on your LAN, set `OLLAMA_HOST` in `.env` to the full URL (e.g. `http://192.168.1.20:11434`) and restart the stack. Private IPs are allowed in the self-hosted version.
+
+### Podman / rootless containers
+
+Podman doesn't ship `/.dockerenv` or `host.docker.internal`. Manifest still
+auto-detects Podman via `/run/.containerenv` and treats the install as
+self-hosted, but the canonical hostname for reaching the host from inside
+a Podman container is `host.containers.internal` (Podman 4+ exposes this
+by default; older versions need `--add-host=host.containers.internal:host-gateway`).
+If you run Manifest as one Podman service and your LLM server (llama.cpp,
+Ollama, etc.) as another, point Manifest at the service name on the shared
+network — e.g. `http://llamacpp:8080/v1` — and **Add custom provider** will
+accept it as long as `MANIFEST_MODE=selfhosted` (the bundled compose file
+sets this automatically).
 
 ## Environment variables
 

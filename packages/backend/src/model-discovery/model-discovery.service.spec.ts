@@ -410,6 +410,120 @@ describe('ModelDiscoveryService', () => {
     });
   });
 
+  /* ── refreshProvider ── */
+
+  describe('refreshProvider', () => {
+    it('returns Provider not found when no row matches', async () => {
+      providerRepo.findOne.mockResolvedValue(null);
+      const result = await service.refreshProvider('agent-1', 'openai');
+      expect(result).toEqual({
+        ok: false,
+        model_count: 0,
+        last_fetched_at: null,
+        error: 'Provider not found',
+      });
+    });
+
+    it('refuses custom providers and reports the cached count', async () => {
+      providerRepo.findOne.mockResolvedValue(
+        makeProvider({
+          provider: 'custom:cp-1',
+          cached_models: [makeModel({ id: 'foo' }), makeModel({ id: 'bar' })],
+          models_fetched_at: '2026-04-12T08:00:00.000Z',
+        }),
+      );
+      const result = await service.refreshProvider('agent-1', 'custom:cp-1');
+      expect(result.ok).toBe(false);
+      expect(result.model_count).toBe(2);
+      expect(result.last_fetched_at).toBe('2026-04-12T08:00:00.000Z');
+      expect(result.error).toContain('Custom providers are managed manually');
+    });
+
+    it('returns ok with the discovered count on success', async () => {
+      const provider = makeProvider({ provider: 'openai' });
+      providerRepo.findOne.mockResolvedValue(provider);
+      fetcher.fetch.mockResolvedValue([
+        makeModel({ id: 'gpt-4o' }),
+        makeModel({ id: 'gpt-4o-mini' }),
+      ]);
+
+      const result = await service.refreshProvider('agent-1', 'openai', 'api_key');
+      expect(providerRepo.findOne).toHaveBeenCalledWith({
+        where: { agent_id: 'agent-1', provider: 'openai', is_active: true, auth_type: 'api_key' },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.model_count).toBe(2);
+      expect(result.error).toBeNull();
+      expect(result.last_fetched_at).toBeDefined();
+    });
+
+    it('returns ok=false with hint when provider returns no models', async () => {
+      const provider = makeProvider({ provider: 'openai', cached_models: null });
+      providerRepo.findOne.mockResolvedValue(provider);
+      fetcher.fetch.mockResolvedValue([]);
+
+      const result = await service.refreshProvider('agent-1', 'openai');
+      expect(result.ok).toBe(false);
+      expect(result.model_count).toBe(0);
+      expect(result.error).toBe('Provider returned no models');
+    });
+
+    it('preserves cached models and reports prior count when discovery throws', async () => {
+      const cachedModels = [makeModel({ id: 'gpt-4o' }), makeModel({ id: 'gpt-4o-mini' })];
+      providerRepo.findOne.mockResolvedValue(
+        makeProvider({
+          provider: 'openai',
+          cached_models: cachedModels,
+          models_fetched_at: '2026-04-01T08:00:00.000Z',
+        }),
+      );
+      // discoverModels itself swallows fetcher errors, so to land in the
+      // refreshProvider catch we make the cache-write throw instead.
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4o' })]);
+      providerRepo.save.mockRejectedValueOnce(new Error('DB write failed'));
+
+      const result = await service.refreshProvider('agent-1', 'openai');
+      expect(result.ok).toBe(false);
+      expect(result.model_count).toBe(2);
+      expect(result.error).toBe('DB write failed');
+      expect(result.last_fetched_at).toBe('2026-04-01T08:00:00.000Z');
+    });
+
+    it('reports a non-Error thrown value via String() in the error field', async () => {
+      providerRepo.findOne.mockResolvedValue(makeProvider({ provider: 'openai' }));
+      fetcher.fetch.mockResolvedValue([makeModel({ id: 'gpt-4o' })]);
+      providerRepo.save.mockRejectedValueOnce('plain-string-failure');
+
+      const result = await service.refreshProvider('agent-1', 'openai');
+      expect(result.ok).toBe(false);
+      expect(result.error).toBe('plain-string-failure');
+    });
+  });
+
+  /* ── empty-result cache preservation ── */
+
+  describe('discoverModels — empty result preserves cache', () => {
+    it('keeps the previous cache when the fetcher returns no models', async () => {
+      const cachedModels = [makeModel({ id: 'gpt-4o' }), makeModel({ id: 'gpt-4o-mini' })];
+      const provider = makeProvider({
+        provider: 'openai',
+        cached_models: cachedModels,
+        models_fetched_at: '2026-04-01T08:00:00.000Z',
+      });
+      fetcher.fetch.mockResolvedValue([]);
+      // Disable fallback sources so the result stays empty.
+      mockPricingSync.getAll.mockReturnValue(new Map());
+      mockModelsDevSync.getModelsForProvider.mockReturnValue([]);
+
+      const result = await service.discoverModels(provider);
+
+      expect(result).toEqual(cachedModels);
+      expect(provider.cached_models).toEqual(cachedModels);
+      expect(provider.models_fetched_at).toBe('2026-04-01T08:00:00.000Z');
+      expect(providerRepo.save).not.toHaveBeenCalled();
+    });
+  });
+
   /* ── getModelsForAgent ── */
 
   describe('getModelsForAgent', () => {
@@ -1136,6 +1250,49 @@ describe('ModelDiscoveryService', () => {
         'minimax-access',
         'subscription',
         'https://api.minimax.io/anthropic',
+      );
+    });
+
+    it('routes pasted-token MiniMax CN subscription discovery to the CN host', async () => {
+      // Pasted sk-cp- token: not a JSON blob, region=cn stored alongside
+      mockDecrypt.mockReturnValue('sk-cp-cn-token');
+      fetcher.fetch.mockResolvedValue([]);
+
+      await service.discoverModels(
+        makeProvider({
+          provider: 'minimax',
+          auth_type: 'subscription',
+          api_key_encrypted: 'encrypted',
+          region: 'cn',
+        }),
+      );
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'minimax',
+        'sk-cp-cn-token',
+        'subscription',
+        'https://api.minimaxi.com/anthropic',
+      );
+    });
+
+    it('leaves discovery on the default host for pasted-token MiniMax global subscription', async () => {
+      mockDecrypt.mockReturnValue('sk-cp-global-token');
+      fetcher.fetch.mockResolvedValue([]);
+
+      await service.discoverModels(
+        makeProvider({
+          provider: 'minimax',
+          auth_type: 'subscription',
+          api_key_encrypted: 'encrypted',
+          region: 'global',
+        }),
+      );
+
+      expect(fetcher.fetch).toHaveBeenCalledWith(
+        'minimax',
+        'sk-cp-global-token',
+        'subscription',
+        undefined,
       );
     });
 
@@ -2105,7 +2262,7 @@ describe('ModelDiscoveryService', () => {
       expect(result[0].capabilityCode).toBe(true);
     });
 
-    it('should fall back to known-model-prices when models.dev and OpenRouter have no data', async () => {
+    it('uses known-model-prices when no upstream source has data', async () => {
       mockModelsDevSync.lookupModel.mockReturnValue(null);
       mockPricingSync.lookupPricing.mockReturnValue(null);
 
@@ -2122,6 +2279,121 @@ describe('ModelDiscoveryService', () => {
 
       expect(result[0].inputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
       expect(result[0].outputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+    });
+
+    it('known-model-prices wins over models.dev for curated models', async () => {
+      // Same model id can appear in models.dev under a different inference
+      // provider with different pricing. The hand-curated entry must win so
+      // a connection's reported pricing reflects THAT connection's provider.
+      mockModelsDevSync.lookupModel.mockReturnValue({
+        id: 'moonshot-v1-8k',
+        name: 'Moonshot v1 8k (cheap-reseller pricing)',
+        inputPricePerToken: 0.000_000_1, // models.dev cheap reseller price
+        outputPricePerToken: 0.000_000_2,
+        contextWindow: 8192,
+      });
+
+      const models = [
+        makeModel({
+          id: 'moonshot-v1-8k',
+          inputPricePerToken: null,
+          outputPricePerToken: null,
+        }),
+      ];
+      fetcher.fetch.mockResolvedValue(models);
+
+      const result = await service.discoverModels(makeProvider());
+
+      // Known-prices ($1.66/1M) wins over models.dev ($0.0001/1M).
+      expect(result[0].inputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+      expect(result[0].outputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+    });
+
+    it('known-model-prices wins over OpenRouter for curated models', async () => {
+      // Mirrors the Groq-served `qwen/qwen3-32b` scenario: OR has the model
+      // id at one provider's price; the connection's actual provider lists
+      // it at a different price in known-model-prices.
+      mockModelsDevSync.lookupModel.mockReturnValue(null);
+      mockPricingSync.lookupPricing.mockReturnValue({
+        input: 0.000_000_08, // OpenRouter's cheap-resale price
+        output: 0.000_000_24,
+        contextWindow: 32768,
+        displayName: 'Moonshot v1 8k via OR',
+      });
+
+      const models = [
+        makeModel({
+          id: 'moonshot-v1-8k',
+          inputPricePerToken: null,
+          outputPricePerToken: null,
+        }),
+      ];
+      fetcher.fetch.mockResolvedValue(models);
+
+      const result = await service.discoverModels(makeProvider());
+
+      expect(result[0].inputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+      expect(result[0].outputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+    });
+
+    it('falls through to models.dev when no known-prices entry exists', async () => {
+      // Non-curated models keep the existing upstream-first behaviour.
+      mockModelsDevSync.lookupModel.mockReturnValue({
+        id: 'totally-novel-model',
+        name: 'Novel Model',
+        inputPricePerToken: 0.001,
+        outputPricePerToken: 0.002,
+        contextWindow: 128_000,
+      });
+
+      const models = [
+        makeModel({
+          id: 'totally-novel-model',
+          inputPricePerToken: null,
+          outputPricePerToken: null,
+        }),
+      ];
+      fetcher.fetch.mockResolvedValue(models);
+
+      const result = await service.discoverModels(makeProvider());
+
+      expect(result[0].inputPricePerToken).toBe(0.001);
+      expect(result[0].outputPricePerToken).toBe(0.002);
+    });
+
+    it('still merges capability flags from models.dev when known-prices wins on pricing', async () => {
+      // Identified by cubic: when known-prices wins, we still want the
+      // reasoning / tool-call flags from models.dev applied — they drive
+      // tier auto-assignment scoring and shouldn't be silently dropped.
+      mockModelsDevSync.lookupModel.mockReturnValue({
+        id: 'moonshot-v1-8k',
+        name: 'Moonshot v1 8k',
+        inputPricePerToken: 0.000_000_1, // ignored — known-prices wins
+        outputPricePerToken: 0.000_000_2,
+        contextWindow: 8192,
+        reasoning: true,
+        toolCall: true,
+      });
+
+      const models = [
+        makeModel({
+          id: 'moonshot-v1-8k',
+          inputPricePerToken: null,
+          outputPricePerToken: null,
+          capabilityReasoning: false,
+          capabilityCode: false,
+        }),
+      ];
+      fetcher.fetch.mockResolvedValue(models);
+
+      const result = await service.discoverModels(makeProvider());
+
+      // Pricing from known-prices.
+      expect(result[0].inputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+      expect(result[0].outputPricePerToken).toBeCloseTo(1.66 / 1_000_000, 12);
+      // Capabilities still merged from models.dev.
+      expect(result[0].capabilityReasoning).toBe(true);
+      expect(result[0].capabilityCode).toBe(true);
     });
 
     it('should return model without pricing when no source has data', async () => {

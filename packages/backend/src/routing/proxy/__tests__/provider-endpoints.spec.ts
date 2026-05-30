@@ -152,6 +152,21 @@ describe('PROVIDER_ENDPOINTS', () => {
     expect(PROVIDER_ENDPOINTS['zai'].format).toBe('openai');
   });
 
+  it('groq uses OpenAI-compatible format at api.groq.com/openai', () => {
+    const ep = PROVIDER_ENDPOINTS['groq'];
+    expect(ep.baseUrl).toBe('https://api.groq.com/openai');
+    expect(ep.format).toBe('openai');
+    expect(ep.buildPath('llama-3.3-70b-versatile')).toBe('/v1/chat/completions');
+  });
+
+  it('groq uses Bearer auth headers', () => {
+    const headers = PROVIDER_ENDPOINTS['groq'].buildHeaders('gsk_test_key');
+    expect(headers).toEqual({
+      Authorization: 'Bearer gsk_test_key',
+      'Content-Type': 'application/json',
+    });
+  });
+
   it('qwen uses DashScope compatible-mode endpoint', () => {
     const ep = PROVIDER_ENDPOINTS['qwen'];
     expect(ep.baseUrl).toBe('https://dashscope.aliyuncs.com/compatible-mode');
@@ -191,14 +206,31 @@ describe('PROVIDER_ENDPOINTS', () => {
     });
   });
 
+  it('copilot-responses targets /responses with chatgpt format and Copilot headers', () => {
+    const ep = PROVIDER_ENDPOINTS['copilot-responses'];
+    expect(ep.baseUrl).toBe('https://api.githubcopilot.com');
+    expect(ep.format).toBe('chatgpt');
+    expect(ep.buildPath('gpt-5.3-codex')).toBe('/responses');
+    expect(ep.buildHeaders('ghu_token')).toEqual({
+      Authorization: 'Bearer ghu_token',
+      'Content-Type': 'application/json',
+      'Editor-Version': 'vscode/1.100.0',
+      'Editor-Plugin-Version': 'copilot/1.300.0',
+      'Copilot-Integration-Id': 'vscode-chat',
+    });
+  });
+
   it('anthropic buildPath returns /v1/messages', () => {
     const path = PROVIDER_ENDPOINTS['anthropic'].buildPath('claude-sonnet-4');
     expect(path).toBe('/v1/messages');
   });
 
-  it('google buildHeaders returns Content-Type only', () => {
-    const headers = PROVIDER_ENDPOINTS['google'].buildHeaders('');
-    expect(headers).toEqual({ 'Content-Type': 'application/json' });
+  it('google buildHeaders sends the API key in x-goog-api-key (not query string)', () => {
+    const headers = PROVIDER_ENDPOINTS['google'].buildHeaders('AIza-test');
+    expect(headers).toEqual({
+      'Content-Type': 'application/json',
+      'x-goog-api-key': 'AIza-test',
+    });
   });
 
   it('google buildPath includes model name with generateContent suffix', () => {

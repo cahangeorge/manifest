@@ -1,18 +1,21 @@
 import { createSignal, For, Show, type Component } from 'solid-js';
-import type {
-  AuthType,
-  AvailableModel,
-  CustomProviderData,
-  RoutingProvider,
-  TierAssignment,
+import {
+  refreshProviderModels,
+  type AuthType,
+  type AvailableModel,
+  type CustomProviderData,
+  type RoutingProvider,
+  type TierAssignment,
 } from '../services/api.js';
-import { PROVIDERS, STAGES, SPECIFICITY_STAGES } from '../services/providers.js';
+import { PROVIDERS, STAGES, SPECIFICITY_STAGES, DEFAULT_STAGE } from '../services/providers.js';
 import { customProviderColor } from '../services/formatters.js';
 import { inferProviderFromModel, pricePerM, resolveProviderId } from '../services/routing-utils.js';
 import { providerIcon, customProviderLogo } from './ProviderIcon.js';
+import { toast } from '../services/toast-store.js';
 
 interface Props {
   tierId: string;
+  agentName?: string;
   models: AvailableModel[];
   tiers: TierAssignment[];
   customProviders?: CustomProviderData[];
@@ -20,6 +23,7 @@ interface Props {
   onSelect: (tierId: string, modelName: string, providerId: string, authType?: AuthType) => void;
   onClose: () => void;
   onConnectProviders?: () => void;
+  onProviderRefreshed?: () => void | Promise<void>;
 }
 
 /** Resolve a display label for a model name, handling vendor-prefixed IDs. */
@@ -67,6 +71,28 @@ const ModelPickerModal: Component<Props> = (props) => {
   const [activeTab, setActiveTab] = createSignal<AuthType>(resolveInitialTab());
   const [search, setSearch] = createSignal('');
   const [showFreeOnly, setShowFreeOnly] = createSignal(false);
+  const [refreshingProvId, setRefreshingProvId] = createSignal<string | null>(null);
+
+  const handleRefreshGroup = async (provId: string, displayName: string) => {
+    if (!props.agentName) return;
+    if (provId.startsWith('custom:')) return;
+    setRefreshingProvId(provId);
+    try {
+      const result = await refreshProviderModels(props.agentName, provId, activeTab());
+      if (result.ok) {
+        toast.success(
+          `${displayName}: refreshed ${result.model_count} model${result.model_count === 1 ? '' : 's'}`,
+        );
+      } else {
+        toast.error(result.error ?? `Couldn't refresh ${displayName}`);
+      }
+      await props.onProviderRefreshed?.();
+    } catch {
+      // network/server error toast already raised by fetchMutate
+    } finally {
+      setRefreshingProvId(null);
+    }
+  };
 
   const providerLabelMap = (): Map<string, string> => {
     const map = new Map<string, string>();
@@ -119,13 +145,15 @@ const ModelPickerModal: Component<Props> = (props) => {
       if (freeOnly && !isFreeModel(m)) continue;
       const dbProvId = resolveProviderId(m.provider);
       const prefixProvId = inferProviderFromModel(m.model_name);
-      // Prefer prefix-inferred provider (e.g. "anthropic" from "anthropic/claude-sonnet-4")
-      // over the DB provider (e.g. "openrouter" when all models come from OpenRouter).
-      // Exception: Ollama providers keep their DB id because Ollama model names
-      // (e.g. "gemma4:31b") would otherwise be mis-inferred as local Ollama
-      // via the colon-suffix heuristic in inferProviderFromModel.
+      // OpenRouter is the one provider where the vendor prefix is genuinely
+      // the best attribution: an OR row for `anthropic/claude-…` should be
+      // grouped under Anthropic, not OpenRouter. For every other registered
+      // first-party provider the stored `m.provider` is the truth — Groq's
+      // `qwen/qwen3-32b` is being served BY Groq, so it must group under
+      // Groq (and use Groq's pricing) regardless of the model-id prefix.
+      // Mirrors the precedence rule in RoutingTierCard.providerIdForModel.
       const provId =
-        dbProvId === 'ollama' || dbProvId === 'ollama-cloud'
+        dbProvId && dbProvId !== 'openrouter' && PROVIDERS.find((p) => p.id === dbProvId)
           ? dbProvId
           : prefixProvId && PROVIDERS.find((p) => p.id === prefixProvId)
             ? prefixProvId
@@ -228,6 +256,12 @@ const ModelPickerModal: Component<Props> = (props) => {
   const isLocal = () => activeTab() === 'local';
   const isPaid = () => !isSub() && !isLocal();
 
+  // Resolve the routing-tier label for the subtitle. Callers outside the
+  // routing context (e.g. the Playground) pass a non-tier id, so there is no
+  // matching stage — render no subtitle instead of a bare "tier".
+  const tierLabel = () =>
+    [DEFAULT_STAGE, ...STAGES, ...SPECIFICITY_STAGES].find((s) => s.id === props.tierId)?.label;
+
   return (
     <div
       class="modal-overlay"
@@ -250,15 +284,9 @@ const ModelPickerModal: Component<Props> = (props) => {
             <div class="routing-modal__title" id="model-picker-title">
               Select a model
             </div>
-            <div class="routing-modal__subtitle">
-              {
-                (
-                  STAGES.find((s) => s.id === props.tierId) ??
-                  SPECIFICITY_STAGES.find((s) => s.id === props.tierId)
-                )?.label
-              }{' '}
-              tier
-            </div>
+            <Show when={tierLabel()}>
+              {(label) => <div class="routing-modal__subtitle">{label()} tier</div>}
+            </Show>
           </div>
           <button class="modal__close" onClick={() => props.onClose()} aria-label="Close">
             <svg
@@ -384,13 +412,13 @@ const ModelPickerModal: Component<Props> = (props) => {
               <path d="m21 21-4.3-4.3" />
             </svg>
             <input
+              ref={(el) => requestAnimationFrame(() => el.focus())}
               class="routing-modal__search"
               type="text"
               placeholder="Search models or providers..."
               aria-label="Search models or providers"
               value={search()}
               onInput={(e) => setSearch(e.currentTarget.value)}
-              autofocus
             />
           </div>
         </Show>
@@ -467,6 +495,37 @@ const ModelPickerModal: Component<Props> = (props) => {
                       : providerIcon(group.provId, 16)}
                   </span>
                   <span class="routing-modal__group-name">{group.name}</span>
+                  <Show when={props.agentName && !group.provId.startsWith('custom:')}>
+                    <button
+                      class="routing-modal__group-refresh"
+                      disabled={refreshingProvId() !== null}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleRefreshGroup(group.provId, group.name);
+                      }}
+                      aria-label={`Refresh ${group.name} models`}
+                      title={`Refresh ${group.name} models`}
+                    >
+                      <svg
+                        width="12"
+                        height="12"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                        aria-hidden="true"
+                        classList={{
+                          'routing-modal__group-refresh-icon--spinning':
+                            refreshingProvId() === group.provId,
+                        }}
+                      >
+                        <path d="M21 12a9 9 0 1 1-3-6.7L21 8" />
+                        <path d="M21 3v5h-5" />
+                      </svg>
+                    </button>
+                  </Show>
                 </div>
                 <For each={group.models}>
                   {(model) => (

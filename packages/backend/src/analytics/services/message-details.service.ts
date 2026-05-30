@@ -7,6 +7,7 @@ import { ToolExecution } from '../../entities/tool-execution.entity';
 import { AgentLog } from '../../entities/agent-log.entity';
 import { TenantCacheService } from '../../common/services/tenant-cache.service';
 import type { CallerAttribution } from '../../routing/proxy/caller-classifier';
+import type { RequestParamDefaults } from 'manifest-shared';
 
 export interface MessageDetailResponse {
   message: {
@@ -31,6 +32,7 @@ export interface MessageDetailResponse {
     specificity_category: string | null;
     specificity_miscategorized: boolean;
     auth_type: string | null;
+    provider_key_label: string | null;
     skill_name: string | null;
     fallback_from_model: string | null;
     fallback_index: number | null;
@@ -39,6 +41,7 @@ export interface MessageDetailResponse {
     feedback_tags: string[] | null;
     feedback_details: string | null;
     request_headers: Record<string, string> | null;
+    request_params: RequestParamDefaults | null;
     caller_attribution: CallerAttribution | null;
     header_tier_id: string | null;
     header_tier_name: string | null;
@@ -156,6 +159,7 @@ export class MessageDetailsService {
         specificity_category: message.specificity_category,
         specificity_miscategorized: message.specificity_miscategorized,
         auth_type: message.auth_type,
+        provider_key_label: message.provider_key_label,
         skill_name: message.skill_name,
         fallback_from_model: message.fallback_from_model,
         fallback_index: message.fallback_index,
@@ -164,6 +168,7 @@ export class MessageDetailsService {
         feedback_tags: message.feedback_tags ? message.feedback_tags.split(',') : null,
         feedback_details: message.feedback_details,
         request_headers: message.request_headers,
+        request_params: message.request_params,
         caller_attribution: message.caller_attribution,
         header_tier_id: message.header_tier_id,
         header_tier_name: message.header_tier_name,

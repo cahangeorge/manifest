@@ -75,10 +75,16 @@ export class SpecificityService {
     model: string,
     provider?: string,
     authType?: AuthType,
+    providerKeyLabel?: string,
   ): Promise<SpecificityAssignment> {
-    const explicit = explicitRoute(model, provider, authType);
+    const explicit = explicitRoute(model, provider, authType, providerKeyLabel);
     const route =
-      explicit ?? unambiguousRoute(model, await this.discoveryService.getModelsForAgent(agentId));
+      explicit ??
+      unambiguousRoute(
+        model,
+        await this.discoveryService.getModelsForAgent(agentId),
+        providerKeyLabel,
+      );
     if (!route) {
       throw new BadRequestException(
         `Model "${model}" is offered by multiple providers — pass an explicit ` +
@@ -111,7 +117,16 @@ export class SpecificityService {
       await this.repo.insert(record);
     } catch {
       const retry = await this.repo.findOne({ where: { agent_id: agentId, category } });
-      if (retry) return this.setOverride(agentId, userId, category, model, provider, authType);
+      if (retry)
+        return this.setOverride(
+          agentId,
+          userId,
+          category,
+          model,
+          provider,
+          authType,
+          providerKeyLabel,
+        );
     }
     this.routingCache.invalidateAgent(agentId);
     return record;
@@ -165,6 +180,10 @@ export class SpecificityService {
     this.routingCache.invalidateAgent(agentId);
   }
 
+  /**
+   * Mirror of {@link TierService.buildFallbackRoutes} — see that docblock for
+   * the issue #1790 rationale on why this throws instead of returning null.
+   */
   private async buildFallbackRoutes(
     agentId: string,
     models: string[],
@@ -189,7 +208,12 @@ export class SpecificityService {
     const resolved: ModelRoute[] = [];
     for (const m of models) {
       const route = unambiguousRoute(m, available);
-      if (!route) return null;
+      if (!route) {
+        throw new BadRequestException(
+          `Cannot resolve fallback model "${m}" to a single connected provider. ` +
+            `Pass an explicit (provider, authType, model) route, or connect exactly one provider that offers this model.`,
+        );
+      }
       resolved.push(route);
     }
     return resolved;

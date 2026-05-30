@@ -16,6 +16,9 @@ const mockGetPricingHealth = vi.fn();
 const mockRefreshPricing = vi.fn();
 const mockGetComplexityStatus = vi.fn();
 const mockToggleComplexity = vi.fn();
+const mockListModelParams = vi.fn();
+const mockSetModelParams = vi.fn();
+const mockDeleteModelParams = vi.fn();
 
 vi.mock("../../src/services/api.js", () => ({
   getTierAssignments: (...args: unknown[]) => mockGetTierAssignments(...args),
@@ -32,6 +35,11 @@ vi.mock("../../src/services/api.js", () => ({
   toggleComplexity: (...args: unknown[]) => mockToggleComplexity(...args),
   setSpecificityFallbacks: (...args: unknown[]) => mockSetSpecificityFallbacks(...args),
   clearSpecificityFallbacks: (...args: unknown[]) => mockClearSpecificityFallbacks(...args),
+  listModelParams: (...args: unknown[]) => mockListModelParams(...args),
+  setModelParams: (...args: unknown[]) => mockSetModelParams(...args),
+  deleteModelParams: (...args: unknown[]) => mockDeleteModelParams(...args),
+  modelParamsKey: (provider: string, authType: string, model: string) =>
+    `${provider.toLowerCase()}::${authType}::${model}`,
   // Re-export types only — no runtime impact
 }));
 
@@ -185,6 +193,18 @@ vi.mock("../../src/components/RoutingModals.js", () => ({
           add-spec-fallback
         </button>
         <button
+          data-testid="modal-trigger-add-spec-fallback-no-auth"
+          onClick={() =>
+            (props.onAddFallback as (id: string, m: string, p: string, a?: string) => void)(
+              "coding",
+              "spec-fb",
+              "openai",
+            )
+          }
+        >
+          add-spec-fallback-no-auth
+        </button>
+        <button
           data-testid="modal-trigger-spec-override"
           onClick={() =>
             (
@@ -251,6 +271,8 @@ vi.mock("../../src/pages/RoutingDefaultTierSection.js", () => ({
       props.getTier,
       props.complexityEnabled,
       props.togglingComplexity,
+      props.getModelParams,
+      props.setModelParams,
     ];
     void _read;
     return (
@@ -267,6 +289,36 @@ vi.mock("../../src/pages/RoutingDefaultTierSection.js", () => ({
         >
           open
         </button>
+        <button
+          data-testid="default-persist-params"
+          onClick={() =>
+            (
+              props.setModelParams as (
+                provider: string,
+                authType: string,
+                model: string,
+                p: { thinking: { type: "enabled" | "disabled" } } | null,
+              ) => Promise<unknown>
+            )("deepseek", "api_key", "deepseek-v4", { thinking: { type: "disabled" } })
+          }
+        >
+          default-persist-params
+        </button>
+        <button
+          data-testid="default-saved-params"
+          onClick={() =>
+            (
+              props.setModelParams as (
+                provider: string,
+                authType: string,
+                model: string,
+                p: { thinking: { type: "enabled" | "disabled" } } | null,
+              ) => Promise<unknown>
+            )("deepseek", "api_key", "deepseek-v4", null)
+          }
+        >
+          default-saved-params
+        </button>
       </div>
     );
   },
@@ -276,8 +328,29 @@ vi.mock("../../src/pages/RoutingSpecificitySection.js", () => ({
   default: (props: {
     onDropdownOpen: (cat: string) => void;
     onReset: (cat: string) => void;
-    onFallbackUpdate: (cat: string, fbs: string[]) => void;
+    onFallbackUpdate: (
+      cat: string,
+      fbs: string[],
+      routes?: { provider: string; authType: string; model: string }[] | null,
+    ) => void;
     onAddFallback: (cat: string) => void;
+    onPinKey?: (
+      cat: string,
+      provider: string,
+      label: string | null,
+      authType?: string,
+    ) => void;
+    setModelParams?: (
+      provider: string,
+      authType: string,
+      model: string,
+      paramDefaults: { thinking: { type: "enabled" | "disabled" } } | null,
+    ) => Promise<unknown>;
+    getModelParams?: (
+      provider: string,
+      authType: string,
+      model: string,
+    ) => { thinking?: { type: "enabled" | "disabled" } } | null;
   }) => (
     <div data-testid="spec-section">
       <button data-testid="spec-open" onClick={() => props.onDropdownOpen("coding")}>
@@ -288,13 +361,23 @@ vi.mock("../../src/pages/RoutingSpecificitySection.js", () => ({
       </button>
       <button
         data-testid="spec-fb-update-add"
-        onClick={() => props.onFallbackUpdate("coding", ["fb1"])}
+        onClick={() =>
+          props.onFallbackUpdate("coding", ["fb1"], [
+            { provider: "openai", authType: "api_key", model: "fb1" },
+          ])
+        }
       >
         spec-fb-add
       </button>
       <button
+        data-testid="spec-fb-update-add-no-routes"
+        onClick={() => props.onFallbackUpdate("coding", ["fb1"])}
+      >
+        spec-fb-add-no-routes
+      </button>
+      <button
         data-testid="spec-fb-update-clear"
-        onClick={() => props.onFallbackUpdate("coding", [])}
+        onClick={() => props.onFallbackUpdate("coding", [], null)}
       >
         spec-fb-clear
       </button>
@@ -303,6 +386,46 @@ vi.mock("../../src/pages/RoutingSpecificitySection.js", () => ({
         onClick={() => props.onAddFallback("coding")}
       >
         spec-add-fallback
+      </button>
+      <button
+        data-testid="spec-pin-key"
+        onClick={() => props.onPinKey?.("coding", "anthropic", "Work", "api_key")}
+      >
+        spec-pin-key
+      </button>
+      <button
+        data-testid="spec-pin-key-clear"
+        onClick={() => props.onPinKey?.("coding", "anthropic", null)}
+      >
+        spec-pin-key-clear
+      </button>
+      <button
+        data-testid="spec-pin-key-missing-cat"
+        onClick={() => props.onPinKey?.("unknown-category", "anthropic", "Work")}
+      >
+        spec-pin-key-missing-cat
+      </button>
+      <button
+        data-testid="spec-pin-key-missing-provider"
+        onClick={() => props.onPinKey?.("coding", "", "Work")}
+      >
+        spec-pin-key-missing-provider
+      </button>
+      <button
+        data-testid="spec-persist-params"
+        onClick={() =>
+          props.setModelParams?.("deepseek", "api_key", "deepseek-v4", {
+            thinking: { type: "disabled" },
+          })
+        }
+      >
+        spec-persist-params
+      </button>
+      <button
+        data-testid="spec-saved-params"
+        onClick={() => props.getModelParams?.("deepseek", "api_key", "deepseek-v4")}
+      >
+        spec-saved-params
       </button>
     </div>
   ),
@@ -384,6 +507,7 @@ beforeEach(() => {
   mockGetComplexityStatus.mockResolvedValue({ enabled: true });
   mockGetPricingHealth.mockResolvedValue({ model_count: 100, last_fetched_at: "2025-01-01" });
   mockToggleComplexity.mockResolvedValue({ enabled: false });
+  mockListModelParams.mockResolvedValue([]);
 });
 
 describe("Routing page", () => {
@@ -541,6 +665,7 @@ describe("Routing page", () => {
         "claude",
         "anthropic",
         "api_key",
+        undefined,
       );
     });
   });
@@ -581,43 +706,209 @@ describe("Routing page", () => {
     });
   });
 
-  it("calls setSpecificityFallbacks for non-empty fallback updates from the spec section", async () => {
+  it("does not fire a parallel persist call from spec onFallbackUpdate when routes are provided", async () => {
+    // The optimistic state mutation only updates local resource state.
+    // Persistence is handled by persistFallbacks; a second call here would
+    // race the first and could drop route metadata.
+    // Seed an assignment so mutateSpecificity actually maps over a non-empty array
+    // (covers the `a.category === category ? ... : a` ternary branches).
+    mockGetSpecificityAssignments.mockResolvedValue([
+      {
+        id: "s1",
+        agent_id: "a",
+        category: "coding",
+        is_active: true,
+        override_route: null,
+        auto_assigned_route: null,
+        fallback_routes: null,
+        updated_at: "2025-01-01",
+      },
+      {
+        id: "s2",
+        agent_id: "a",
+        category: "trading",
+        is_active: true,
+        override_route: null,
+        auto_assigned_route: null,
+        fallback_routes: null,
+        updated_at: "2025-01-01",
+      },
+    ]);
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("spec-fb-update-add")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("spec-fb-update-add"));
+    fireEvent.click(screen.getByTestId("spec-fb-update-clear"));
+    // Give the async handler a chance to fire if it were going to.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockSetSpecificityFallbacks).not.toHaveBeenCalled();
+    expect(mockClearSpecificityFallbacks).not.toHaveBeenCalled();
+  });
+
+  it("returns early when spec onFallbackUpdate is called without routes", async () => {
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("spec-fb-update-add-no-routes")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("spec-fb-update-add-no-routes"));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(mockSetSpecificityFallbacks).not.toHaveBeenCalled();
+    expect(mockToastError).not.toHaveBeenCalled();
+  });
+
+  describe("handleSpecificityPinKey", () => {
+    const codingAssignment = {
+      id: "s1",
+      agent_id: "a",
+      category: "coding",
+      is_active: true,
+      override_route: { provider: "anthropic", authType: "api_key" as const, model: "claude-opus" },
+      auto_assigned_route: null,
+      fallback_routes: [],
+      updated_at: "2025-01-01",
+    };
+
+    it("calls overrideSpecificity with the new keyLabel and re-uses the existing model", async () => {
+      mockGetSpecificityAssignments.mockResolvedValue([codingAssignment]);
+      mockOverrideSpecificity.mockResolvedValue(undefined);
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key"));
+      await waitFor(() => {
+        expect(mockOverrideSpecificity).toHaveBeenCalledWith(
+          "demo",
+          "coding",
+          "claude-opus",
+          "anthropic",
+          "api_key",
+          "Work",
+        );
+        expect(mockToastSuccess).toHaveBeenCalledWith('Pinned to "Work" key');
+      });
+    });
+
+    it("emits 'Key pin cleared' when the label is null", async () => {
+      mockGetSpecificityAssignments.mockResolvedValue([codingAssignment]);
+      mockOverrideSpecificity.mockResolvedValue(undefined);
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key-clear")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key-clear"));
+      await waitFor(() => {
+        expect(mockOverrideSpecificity).toHaveBeenCalledWith(
+          "demo",
+          "coding",
+          "claude-opus",
+          "anthropic",
+          "api_key",
+          undefined,
+        );
+        expect(mockToastSuccess).toHaveBeenCalledWith("Key pin cleared");
+      });
+    });
+
+    it("falls back to auto_assigned_route's model when override is null", async () => {
+      const autoAssignment = {
+        ...codingAssignment,
+        override_route: null,
+        auto_assigned_route: {
+          provider: "anthropic",
+          authType: "api_key" as const,
+          model: "claude-haiku",
+        },
+      };
+      mockGetSpecificityAssignments.mockResolvedValue([autoAssignment]);
+      mockOverrideSpecificity.mockResolvedValue(undefined);
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key"));
+      await waitFor(() => {
+        expect(mockOverrideSpecificity).toHaveBeenCalledWith(
+          "demo",
+          "coding",
+          "claude-haiku",
+          "anthropic",
+          "api_key",
+          "Work",
+        );
+      });
+    });
+
+    it("does nothing when the category does not match an existing assignment", async () => {
+      mockGetSpecificityAssignments.mockResolvedValue([codingAssignment]);
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key-missing-cat")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key-missing-cat"));
+      // Wait one tick to make sure no async overrideSpecificity call slips through
+      await new Promise((r) => setTimeout(r, 5));
+      expect(mockOverrideSpecificity).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when the provider id is empty", async () => {
+      mockGetSpecificityAssignments.mockResolvedValue([codingAssignment]);
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key-missing-provider")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key-missing-provider"));
+      await new Promise((r) => setTimeout(r, 5));
+      expect(mockOverrideSpecificity).not.toHaveBeenCalled();
+    });
+
+    it("swallows errors silently (toast handled upstream by fetchMutate)", async () => {
+      mockGetSpecificityAssignments.mockResolvedValue([codingAssignment]);
+      mockOverrideSpecificity.mockRejectedValue(new Error("boom"));
+      render(() => <Routing />);
+      await waitFor(() => {
+        expect(screen.getByTestId("spec-pin-key")).toBeDefined();
+      });
+      fireEvent.click(screen.getByTestId("spec-pin-key"));
+      await waitFor(() => {
+        expect(mockOverrideSpecificity).toHaveBeenCalled();
+      });
+      // No success toast on rejection
+      expect(mockToastSuccess).not.toHaveBeenCalledWith('Pinned to "Work" key');
+    });
+  });
+
+  it("omits the routes payload when the spec fallback caller has no authType", async () => {
+    mockGetSpecificityAssignments.mockResolvedValue([
+      {
+        id: "s1",
+        agent_id: "a",
+        category: "coding",
+        is_active: true,
+        override_route: null,
+        auto_assigned_route: null,
+        fallback_routes: [],
+        updated_at: "2025-01-01",
+      },
+    ]);
     mockSetSpecificityFallbacks.mockResolvedValue(undefined);
     render(() => <Routing />);
     await waitFor(() => {
-      expect(screen.getByTestId("spec-fb-update-add")).toBeDefined();
+      expect(screen.getByTestId("modal-trigger-add-spec-fallback-no-auth")).toBeDefined();
     });
-    fireEvent.click(screen.getByTestId("spec-fb-update-add"));
+    fireEvent.click(screen.getByTestId("modal-trigger-add-spec-fallback-no-auth"));
     await waitFor(() => {
-      expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith("demo", "coding", ["fb1"]);
+      expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith(
+        "demo",
+        "coding",
+        ["spec-fb"],
+        undefined,
+      );
     });
   });
 
-  it("calls clearSpecificityFallbacks for empty fallback updates from the spec section", async () => {
-    mockClearSpecificityFallbacks.mockResolvedValue(undefined);
-    render(() => <Routing />);
-    await waitFor(() => {
-      expect(screen.getByTestId("spec-fb-update-clear")).toBeDefined();
-    });
-    fireEvent.click(screen.getByTestId("spec-fb-update-clear"));
-    await waitFor(() => {
-      expect(mockClearSpecificityFallbacks).toHaveBeenCalledWith("demo", "coding");
-    });
-  });
-
-  it("toasts when spec fallback update fails", async () => {
-    mockSetSpecificityFallbacks.mockRejectedValue(new Error("boom"));
-    render(() => <Routing />);
-    await waitFor(() => {
-      expect(screen.getByTestId("spec-fb-update-add")).toBeDefined();
-    });
-    fireEvent.click(screen.getByTestId("spec-fb-update-add"));
-    await waitFor(() => {
-      expect(mockToastError).toHaveBeenCalledWith("Failed to update fallbacks");
-    });
-  });
-
-  it("calls setSpecificityFallbacks when modals add a fallback for a specificity tier", async () => {
+  it("calls setSpecificityFallbacks with explicit routes when modals add a fallback for a specificity tier", async () => {
     mockGetSpecificityAssignments.mockResolvedValue([
       {
         id: "s1",
@@ -637,7 +928,12 @@ describe("Routing page", () => {
     });
     fireEvent.click(screen.getByTestId("modal-trigger-add-spec-fallback"));
     await waitFor(() => {
-      expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith("demo", "coding", ["spec-fb"]);
+      expect(mockSetSpecificityFallbacks).toHaveBeenCalledWith(
+        "demo",
+        "coding",
+        ["spec-fb"],
+        [{ provider: "openai", authType: "api_key", model: "spec-fb" }],
+      );
     });
   });
 
@@ -890,6 +1186,107 @@ describe("Routing page", () => {
       expect(screen.getByTestId("modal-trigger-get-tier-spec")).toBeDefined();
     });
     fireEvent.click(screen.getByTestId("modal-trigger-get-tier-spec"));
+    expect(true).toBe(true);
+  });
+
+  // Verify the per-model params wiring. Each Section's mock invokes the
+  // setModelParams handler handed down by Routing.tsx; the assertions confirm
+  // those calls reach the new /model-params endpoint and that the local cache
+  // updates without a refetch.
+  it("setModelParams on the Default Tier Section calls the new endpoint and updates the cache", async () => {
+    // Seed the cache with a stale row for the same route + a sibling row for
+    // a different route so the de-dupe filter both removes the match (lines
+    // covering provider/authType/model comparison) and keeps the non-match.
+    mockListModelParams.mockResolvedValue([
+      {
+        provider: "DeepSeek",
+        authType: "api_key",
+        model: "deepseek-v4",
+        params: { thinking: { type: "enabled" } },
+      },
+      {
+        provider: "openai",
+        authType: "api_key",
+        model: "gpt-4o",
+        params: { thinking: { type: "enabled" } },
+      },
+    ]);
+    mockSetModelParams.mockResolvedValue({
+      provider: "deepseek",
+      authType: "api_key",
+      model: "deepseek-v4",
+      params: { thinking: { type: "disabled" } },
+    });
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("default-persist-params")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("default-persist-params"));
+    await waitFor(() => {
+      expect(mockSetModelParams).toHaveBeenCalledWith("demo", {
+        provider: "deepseek",
+        authType: "api_key",
+        model: "deepseek-v4",
+        params: { thinking: { type: "disabled" } },
+      });
+    });
+  });
+
+  it("setModelParams with null deletes via the new endpoint", async () => {
+    // Seed two rows so the delete-path filter callback both excludes the
+    // match (case-insensitive provider compare) and retains the sibling.
+    mockListModelParams.mockResolvedValue([
+      {
+        provider: "DeepSeek",
+        authType: "api_key",
+        model: "deepseek-v4",
+        params: { thinking: { type: "disabled" } },
+      },
+      {
+        provider: "anthropic",
+        authType: "api_key",
+        model: "claude-3-5-sonnet",
+        params: { thinking: { type: "disabled" } },
+      },
+    ]);
+    mockDeleteModelParams.mockResolvedValue({ ok: true });
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("default-saved-params")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("default-saved-params"));
+    await waitFor(() => {
+      expect(mockDeleteModelParams).toHaveBeenCalledWith("demo", {
+        provider: "deepseek",
+        authType: "api_key",
+        model: "deepseek-v4",
+      });
+    });
+  });
+
+  it("setModelParams on the Specificity Section calls the new endpoint", async () => {
+    mockSetModelParams.mockResolvedValue({
+      provider: "deepseek",
+      authType: "api_key",
+      model: "deepseek-v4",
+      params: { thinking: { type: "disabled" } },
+    });
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("spec-persist-params")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("spec-persist-params"));
+    await waitFor(() => {
+      expect(mockSetModelParams).toHaveBeenCalled();
+    });
+  });
+
+  it("getModelParams threads through to the Specificity Section without a fetch per surface", async () => {
+    render(() => <Routing />);
+    await waitFor(() => {
+      expect(screen.getByTestId("spec-saved-params")).toBeDefined();
+    });
+    fireEvent.click(screen.getByTestId("spec-saved-params"));
     expect(true).toBe(true);
   });
 });

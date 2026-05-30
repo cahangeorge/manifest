@@ -13,6 +13,10 @@ import {
   collectResponsesSseResponse,
   fromChatCompletionResponse,
 } from './responses-adapter';
+import {
+  chatCompletionsResponseToMessages,
+  createMessagesStreamTransformer,
+} from './anthropic-messages-adapter';
 import type { ProxyApiMode } from './proxy-types';
 import type { ThoughtSignatureCache } from './thought-signature-cache';
 import type { ThinkingBlockCache, ThinkingBlock } from './thinking-block-cache';
@@ -93,8 +97,10 @@ export async function handleProviderError(
       authType: meta.auth_type,
       reason: meta.reason,
       specificityCategory: meta.specificity_category,
+      providerKeyLabel: meta.provider_key_label,
       callerAttribution,
       requestHeaders,
+      requestParams: meta.request_params,
       headerTierId: meta.header_tier_id,
       headerTierName: meta.header_tier_name,
       headerTierColor: meta.header_tier_color,
@@ -140,6 +146,7 @@ function handleFallbackExhausted(
       reason: meta.reason,
       callerAttribution,
       requestHeaders,
+      requestParams: meta.request_params,
       headerTierId: meta.header_tier_id,
       headerTierName: meta.header_tier_name,
       headerTierColor: meta.header_tier_color,
@@ -161,6 +168,7 @@ function handleFallbackExhausted(
         reason: meta.reason,
         callerAttribution,
         requestHeaders,
+        requestParams: meta.request_params,
         headerTierId: meta.header_tier_id,
         headerTierName: meta.header_tier_name,
         headerTierColor: meta.header_tier_color,
@@ -206,6 +214,10 @@ export function recordFallbackFailures(
   const fallbackBaseTime = Date.now();
   const failures = failedFallbacks ?? [];
 
+  // The primary's auth_type is preserved separately on a fallback-success flow
+  // (see RoutingMeta.primaryAuthType / #1173). Older meta shapes only carry
+  // `auth_type`, so fall back to it when primaryAuthType is absent.
+  const primaryAuthType = meta.primaryAuthType ?? meta.auth_type;
   recordSafely(
     recorder.recordPrimaryFailure(
       ctx,
@@ -213,7 +225,7 @@ export function recordFallbackFailures(
       meta.fallbackFromModel,
       meta.primaryErrorBody ?? `Provider returned HTTP ${meta.primaryErrorStatus ?? 500}`,
       new Date(fallbackBaseTime).toISOString(),
-      meta.auth_type,
+      primaryAuthType,
       {
         // Use the primary provider explicitly — meta.provider holds the
         // succeeding fallback's provider in this flow, not the primary's.
@@ -221,6 +233,7 @@ export function recordFallbackFailures(
         reason: meta.reason,
         callerAttribution,
         requestHeaders,
+        requestParams: meta.request_params,
         headerTierId: meta.header_tier_id,
         headerTierName: meta.header_tier_name,
         headerTierColor: meta.header_tier_color,
@@ -234,10 +247,11 @@ export function recordFallbackFailures(
       recorder.recordFailedFallbacks(ctx, meta.tier, meta.fallbackFromModel, failures, {
         baseTimeMs: fallbackBaseTime,
         markHandled: true,
-        authType: meta.auth_type,
+        authType: primaryAuthType,
         reason: meta.reason,
         callerAttribution,
         requestHeaders,
+        requestParams: meta.request_params,
         headerTierId: meta.header_tier_id,
         headerTierName: meta.header_tier_name,
         headerTierColor: meta.header_tier_color,
@@ -263,23 +277,38 @@ export async function handleStreamResponse(
 ): Promise<StreamUsage | null> {
   initSseHeaders(res, metaHeaders);
 
+  const messagesTransformer =
+    apiMode === 'messages' ? createMessagesStreamTransformer(meta.model) : null;
+  const finalize = messagesTransformer ? () => messagesTransformer.finalize() : undefined;
   const toClientChunk =
-    apiMode === 'responses' ? chatCompletionStreamChunkToResponses : (chunk: string) => chunk;
+    apiMode === 'responses'
+      ? chatCompletionStreamChunkToResponses
+      : messagesTransformer
+        ? messagesTransformer.transform
+        : (chunk: string) => chunk;
 
   if (apiMode === 'responses' && forward.isResponses) {
     return pipeStream(forward.response.body!, res);
   }
 
   if (forward.isGoogle) {
-    return pipeStream(forward.response.body!, res, (chunk) => {
-      const { chunk: out, signatures } = providerClient.convertGoogleStreamChunk(chunk, meta.model);
-      if (signatureCache && sessionKey) {
-        for (const s of signatures) {
-          signatureCache.store(sessionKey, s.toolCallId, s.signature);
+    return pipeStream(
+      forward.response.body!,
+      res,
+      (chunk) => {
+        const { chunk: out, signatures } = providerClient.convertGoogleStreamChunk(
+          chunk,
+          meta.model,
+        );
+        if (signatureCache && sessionKey) {
+          for (const s of signatures) {
+            signatureCache.store(sessionKey, s.toolCallId, s.signature);
+          }
         }
-      }
-      return out ? toClientChunk(out) : null;
-    });
+        return out ? toClientChunk(out) : null;
+      },
+      finalize,
+    );
   }
   if (forward.isAnthropic) {
     const onThinkingBlocks =
@@ -292,18 +321,30 @@ export async function handleStreamResponse(
       meta.model,
       onThinkingBlocks,
     );
-    return pipeStream(forward.response.body!, res, (chunk) => {
-      const out = anthropicTransformer(chunk);
-      return out ? toClientChunk(out) : null;
-    });
-  }
-  if (forward.isChatGpt) {
-    return pipeStream(forward.response.body!, res, (chunk) =>
-      providerClient.convertChatGptStreamChunk(chunk, meta.model),
+    return pipeStream(
+      forward.response.body!,
+      res,
+      (chunk) => {
+        const out = anthropicTransformer(chunk);
+        return out ? toClientChunk(out) : null;
+      },
+      finalize,
     );
   }
-  if (apiMode === 'responses') {
-    return pipeStream(forward.response.body!, res, toClientChunk);
+  if (forward.isChatGpt) {
+    return pipeStream(
+      forward.response.body!,
+      res,
+      (chunk) => {
+        const out = providerClient.convertChatGptStreamChunk(chunk, meta.model);
+        if (!messagesTransformer) return out;
+        return out ? toClientChunk(out) : null;
+      },
+      finalize,
+    );
+  }
+  if (apiMode === 'responses' || apiMode === 'messages') {
+    return pipeStream(forward.response.body!, res, toClientChunk, finalize);
   }
   return pipeStream(forward.response.body!, res);
 }
@@ -357,6 +398,11 @@ export async function handleNonStreamResponse(
 
   if (apiMode === 'responses' && !forward.isResponses) {
     responseBody = fromChatCompletionResponse(responseBody as Record<string, unknown>, meta.model);
+  } else if (apiMode === 'messages') {
+    responseBody = chatCompletionsResponseToMessages(
+      responseBody as Record<string, unknown>,
+      meta.model,
+    );
   }
 
   const body = responseBody as Record<string, unknown> | undefined;
@@ -410,9 +456,11 @@ export function recordSuccess(
         timestamp: fallbackSuccessTs,
         authType: meta.auth_type,
         reason: meta.reason,
+        providerKeyLabel: meta.provider_key_label,
         usage: streamUsage ?? undefined,
         callerAttribution,
         requestHeaders,
+        requestParams: meta.request_params,
         headerTierId: meta.header_tier_id,
         headerTierName: meta.header_tier_name,
         headerTierColor: meta.header_tier_color,
@@ -430,8 +478,10 @@ export function recordSuccess(
         sessionKey,
         durationMs,
         specificityCategory: meta.specificity_category,
+        providerKeyLabel: meta.provider_key_label,
         callerAttribution,
         requestHeaders,
+        requestParams: meta.request_params,
         headerTierId: meta.header_tier_id,
         headerTierName: meta.header_tier_name,
         headerTierColor: meta.header_tier_color,

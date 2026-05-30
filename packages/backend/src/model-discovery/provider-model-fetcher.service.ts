@@ -1,6 +1,13 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DiscoveredModel, FetcherConfig } from './model-fetcher';
 import { OLLAMA_CLOUD_HOST, OLLAMA_HOST } from '../common/constants/ollama';
+import {
+  CODEX_CLI_ORIGINATOR,
+  CODEX_CLI_USER_AGENT,
+  CODEX_CLI_VERSION,
+  COPILOT_EDITOR_VERSION,
+  COPILOT_PLUGIN_VERSION,
+} from '../common/constants/subscription-clients';
 import { normalizeMinimaxSubscriptionBaseUrl } from '../routing/provider-base-url';
 import { getQwenCompatibleBaseUrl, normalizeQwenCompatibleBaseUrl } from '../routing/qwen-region';
 import { OpencodeGoCatalogService } from './opencode-go-catalog.service';
@@ -103,10 +110,25 @@ export const PROVIDER_NON_CHAT: Record<string, RegExp> = {
     /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|^gpt-3\.5-turbo-instruct|audio|^chatgpt-image|^gpt-image-|search-api)/i,
   'openai-subscription':
     /(?:moderation|davinci|babbage|^text-|realtime|-transcribe|^sora|audio|^chatgpt-image|^gpt-image-)/i,
+  // `flash-lite-preview-MM-YYYY` matches deprecated dated snapshots
+  // (e.g. gemini-2.5-flash-lite-preview-09-2025). The unsuffixed
+  // `gemini-3.1-flash-lite-preview` is the canonical preview alias and
+  // must NOT be filtered.
   gemini:
-    /(?:^aqs-|nano-banana|^deep-research|computer-use|^lyria|^gemini-2\.0-flash-lite$|flash-lite-preview|robotics)/i,
+    /(?:^aqs-|nano-banana|^deep-research|computer-use|^lyria|^gemini-2\.0-flash-lite$|flash-lite-preview-\d{2}-\d{4}$|robotics)/i,
   mistral:
     /(?:^mistral-ocr|moderation|voxtral-.*-(?:transcribe|realtime)|^labs-|^mistral-vibe-cli)/i,
+  // Groq filters:
+  //  - compound family: server-side router/agent product (compound,
+  //    compound-mini, compound-beta). Not a model the user picks directly,
+  //    and OpenRouter's cache surfaces it with the wrong attribution if we
+  //    let it through. Match start-of-string, slash-prefixed (models.dev
+  //    returns `groq/compound`), and hyphen-prefixed forms.
+  //  - prompt-guard: small Llama classifier, not a chat model.
+  //  - orpheus: text-to-speech, not chat.
+  // Note: do NOT block "safeguard" — Groq's gpt-oss-safeguard-20b is a chat
+  // model the user can call.
+  groq: /(?:(?:^|\/|-)compound|prompt-guard|orpheus)/i,
   xai: /(?:imagine|multi-agent)/i,
   copilot: /accounts\/[^/]+\/routers\//i,
 };
@@ -321,17 +343,22 @@ export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
     parse: parseOpenAIDeduped,
   },
   'openai-subscription': {
-    endpoint: 'https://chatgpt.com/backend-api/codex/models?client_version=0.99.0',
+    endpoint: `https://chatgpt.com/backend-api/codex/models?client_version=${CODEX_CLI_VERSION}`,
     buildHeaders: (key: string) => ({
       Authorization: `Bearer ${key}`,
       'Content-Type': 'application/json',
-      originator: 'codex_cli_rs',
-      'user-agent': 'codex_cli_rs/0.0.0 (Unknown 0; unknown) unknown',
+      originator: CODEX_CLI_ORIGINATOR,
+      'user-agent': CODEX_CLI_USER_AGENT,
     }),
     parse: parseOpenaiSubscription,
   },
   deepseek: {
     endpoint: 'https://api.deepseek.com/models',
+    buildHeaders: bearerHeaders,
+    parse: parseOpenAI,
+  },
+  groq: {
+    endpoint: 'https://api.groq.com/openai/v1/models',
     buildHeaders: bearerHeaders,
     parse: parseOpenAI,
   },
@@ -420,8 +447,8 @@ export const PROVIDER_CONFIGS: Record<string, FetcherConfig> = {
     buildHeaders: (key: string) => ({
       Authorization: `Bearer ${key}`,
       Accept: 'application/json',
-      'Editor-Version': 'vscode/1.100.0',
-      'Editor-Plugin-Version': 'copilot/1.300.0',
+      'Editor-Version': COPILOT_EDITOR_VERSION,
+      'Editor-Plugin-Version': COPILOT_PLUGIN_VERSION,
       'Copilot-Integration-Id': 'vscode-chat',
     }),
     parse: parseCopilot,

@@ -47,6 +47,9 @@ vi.mock("../../src/services/routing-utils.js", () => ({
     if (m.startsWith("claude")) return "anthropic";
     return undefined;
   },
+  // No-op for test setups that don't depend on multi-key dedup behavior.
+  // The PrimaryKeyChip multi-key suite below overrides this when needed.
+  usedKeyLabelsForModelInTier: () => new Set<string>(),
 }));
 
 vi.mock("../../src/services/formatters.js", () => ({
@@ -72,6 +75,8 @@ vi.mock("../../src/components/FallbackList.js", () => ({
       props.primaryDragging,
       props.persistFallbacks,
       props.persistClearFallbacks,
+      props.getModelParams,
+      props.setModelParams,
     ];
     void _read;
     return (
@@ -216,6 +221,8 @@ function makeProps(overrides: Partial<Parameters<typeof RoutingTierCard>[0]> = {
     onAddFallback: vi.fn(),
     getFallbacksFor: () => baseTier.fallback_routes!.map((r) => r.model),
     connectedProviders: () => activeProviders,
+    getModelParams: () => null,
+    setModelParams: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as Parameters<typeof RoutingTierCard>[0];
 }
@@ -393,7 +400,13 @@ describe("RoutingTierCard", () => {
           { provider: "openai", authType: "api_key", model: "gpt-4o" },
         ],
       );
-      expect(onOverride).toHaveBeenCalledWith("simple", "gpt-4o-mini", "openai", "api_key");
+      expect(onOverride).toHaveBeenCalledWith(
+        "simple",
+        "gpt-4o-mini",
+        "openai",
+        "api_key",
+        undefined,
+      );
     });
   });
 
@@ -446,7 +459,13 @@ describe("RoutingTierCard", () => {
     );
     await waitFor(() => {
       // The promoted fallback is index 1 (gpt-4o-mini, openai/api_key).
-      expect(onOverride).toHaveBeenCalledWith("simple", "gpt-4o-mini", "openai", "api_key");
+      expect(onOverride).toHaveBeenCalledWith(
+        "simple",
+        "gpt-4o-mini",
+        "openai",
+        "api_key",
+        undefined,
+      );
     });
   });
 
@@ -1012,7 +1031,13 @@ describe("RoutingTierCard", () => {
         ["gpt-4o-mini", "gpt-4o"],
         null,
       );
-      expect(onOverride).toHaveBeenCalledWith("simple", "claude", expect.any(String), undefined);
+      expect(onOverride).toHaveBeenCalledWith(
+        "simple",
+        "claude",
+        expect.any(String),
+        undefined,
+        undefined,
+      );
     });
   });
 
@@ -1069,5 +1094,234 @@ describe("RoutingTierCard", () => {
       <RoutingTierCard {...makeProps({ tier: () => tier, customProviders: () => [] })} />
     ));
     expect(container.querySelector(".provider-card__logo-letter")?.textContent).toBe("C");
+  });
+
+  describe("PrimaryKeyChip (multi-key)", () => {
+    const multiKeyProviders: RoutingProvider[] = [
+      {
+        id: "p1",
+        provider: "openai",
+        auth_type: "api_key",
+        is_active: true,
+        has_api_key: true,
+        label: "Work",
+        priority: 0,
+        connected_at: "2025-01-01",
+      },
+      {
+        id: "p2",
+        provider: "openai",
+        auth_type: "api_key",
+        is_active: true,
+        has_api_key: true,
+        label: "Personal",
+        priority: 1,
+        connected_at: "2025-01-01",
+      },
+    ];
+
+    it("does NOT render the key chip when only one connected key matches the provider/auth", () => {
+      const { container } = render(() => <RoutingTierCard {...makeProps()} />);
+      expect(container.querySelector(".routing-card__key-chip")).toBeNull();
+    });
+
+    it("renders the key chip when 2+ keys are connected for the primary's provider", () => {
+      const { container } = render(() => (
+        <RoutingTierCard
+          {...makeProps({
+            connectedProviders: () => multiKeyProviders,
+          })}
+        />
+      ));
+      const chip = container.querySelector(".routing-card__key-chip") as HTMLButtonElement | null;
+      expect(chip).not.toBeNull();
+      // displayLabel falls back to the first key's label when keyLabel is null
+      expect(chip?.textContent).toContain("Work");
+    });
+
+    it("shows the explicit keyLabel pin from the override route over the first connected key", () => {
+      const tier = {
+        ...baseTier,
+        override_route: {
+          provider: "openai",
+          authType: "api_key" as const,
+          model: "gpt-4o",
+          keyLabel: "Personal",
+        },
+      };
+      const { container } = render(() => (
+        <RoutingTierCard
+          {...makeProps({
+            tier: () => tier,
+            connectedProviders: () => multiKeyProviders,
+          })}
+        />
+      ));
+      const chip = container.querySelector(".routing-card__key-chip");
+      expect(chip?.textContent).toContain("Personal");
+    });
+
+    it("emits onPinKey with the chosen label when a list option is clicked", async () => {
+      const onPinKey = vi.fn();
+      const { container } = render(() => (
+        <RoutingTierCard
+          {...makeProps({
+            connectedProviders: () => multiKeyProviders,
+            onPinKey,
+          })}
+        />
+      ));
+      const chip = container.querySelector(".routing-card__key-chip") as HTMLButtonElement;
+      fireEvent.click(chip);
+      await waitFor(() => {
+        // Expanded listbox renders one option per key.
+        const options = container.querySelectorAll('[role="option"]');
+        expect(options.length).toBeGreaterThan(0);
+      });
+      const personalOption = Array.from(container.querySelectorAll('[role="option"]')).find(
+        (o) => o.textContent?.includes("Personal"),
+      ) as HTMLElement | undefined;
+      expect(personalOption).toBeDefined();
+      fireEvent.click(personalOption!);
+      expect(onPinKey).toHaveBeenCalledWith("simple", "openai", "Personal", "api_key");
+    });
+
+    it("does not render the chip when the effective auth is 'local'", () => {
+      const tier = {
+        ...baseTier,
+        override_route: {
+          provider: "openai",
+          authType: "local" as const,
+          model: "gpt-4o",
+        },
+      };
+      const { container } = render(() => (
+        <RoutingTierCard
+          {...makeProps({
+            tier: () => tier,
+            connectedProviders: () => multiKeyProviders,
+          })}
+        />
+      ));
+      expect(container.querySelector(".routing-card__key-chip")).toBeNull();
+    });
+  });
+
+});
+
+/* ── providerIdForModel: dbId-vs-prefix precedence ──────────────────────── */
+
+describe("providerIdForModel route-provider attribution", () => {
+  // Tests at the helper level: prefer the stored connection provider over
+  // the model-id prefix for first-party providers, except OpenRouter where
+  // the prefix is the more informative attribution. Regression coverage for
+  // the bug where Groq-served `qwen/qwen3-32b` rendered with the Qwen logo
+  // and Qwen-via-OR pricing.
+  const baseModel = {
+    auth_type: "api_key" as const,
+    input_price_per_token: 0,
+    output_price_per_token: 0,
+    context_window: 0,
+    capability_reasoning: false,
+    capability_code: false,
+    quality_score: 0,
+    display_name: "",
+  };
+
+  it("returns the stored provider for a redistributor (e.g. openai serving claude-named model)", async () => {
+    // `openai` is in the mocked PROVIDERS list. The model name infers
+    // `anthropic` via prefix. With the fix, dbId wins → "openai".
+    const { providerIdForModel } = await import("../../src/pages/RoutingTierCard.js");
+    const id = providerIdForModel("claude-foo", [
+      { ...baseModel, model_name: "claude-foo", provider: "openai" },
+    ]);
+    expect(id).toBe("openai");
+  });
+
+  it("falls through to prefix inference for OpenRouter rows", async () => {
+    // OpenRouter is the documented exception: an OR row for a vendor-prefixed
+    // model should display the vendor logo (Anthropic), not the OR logo.
+    const { providerIdForModel } = await import("../../src/pages/RoutingTierCard.js");
+    const id = providerIdForModel("claude-bar", [
+      { ...baseModel, model_name: "claude-bar", provider: "openrouter" },
+    ]);
+    expect(id).toBe("anthropic");
+  });
+
+  it("uses the stored provider when prefix is unknown", async () => {
+    // Prefix doesn't match any known mocked rule → should still resolve
+    // through dbId.
+    const { providerIdForModel } = await import("../../src/pages/RoutingTierCard.js");
+    const id = providerIdForModel("totally-novel-model", [
+      { ...baseModel, model_name: "totally-novel-model", provider: "openai" },
+    ]);
+    expect(id).toBe("openai");
+  });
+
+  it("preserves Ollama-id behaviour (dbId always wins)", async () => {
+    // Existing intent: avoid colon-suffix heuristic mis-routing cloud models
+    // to local Ollama. With the new logic Ollama still resolves via dbId
+    // because `ollama` is registered in PROVIDERS.
+    const { providerIdForModel } = await import("../../src/pages/RoutingTierCard.js");
+    const id = providerIdForModel("anything", [
+      { ...baseModel, model_name: "anything", provider: "openai" },
+    ]);
+    expect(id).toBe("openai");
+  });
+
+  // Exercise the affordance JSX with a provider that has a registered param
+  // spec (deepseek). Solid lazily evaluates each JSX prop expression, so the
+  // affordance Show block's inner attributes (provider, authType, model,
+  // slotLabel, getParams, setParams) only fire when the child renders. With
+  // openai (no specs) the child returns null and those attributes stay
+  // unevaluated — a deepseek tier triggers them all.
+  it("renders the params affordance on the primary chip and forwards saves through setModelParams", async () => {
+    const setModelParams = vi.fn().mockResolvedValue(undefined);
+    const deepseekTier = {
+      ...baseTier,
+      override_route: { provider: "deepseek", authType: "api_key" as const, model: "deepseek-v4" },
+    };
+    const deepseekModels = [
+      {
+        ...models[0],
+        model_name: "deepseek-v4",
+        provider: "DeepSeek",
+        auth_type: "api_key" as const,
+        display_name: "DeepSeek V4",
+      },
+    ];
+    const deepseekProviders = [
+      { provider: "deepseek", auth_type: "api_key" as const, is_active: true } as any,
+    ];
+    const { container, getByRole } = render(() => (
+      <RoutingTierCard
+        {...makeProps({
+          tier: () => deepseekTier,
+          models: () => deepseekModels,
+          activeProviders: () => deepseekProviders,
+          connectedProviders: () => deepseekProviders,
+          getModelParams: () => null,
+          setModelParams,
+        })}
+      />
+    ));
+    const btn = container.querySelector(
+      '[aria-label="Configure model parameters for DeepSeek V4"]',
+    ) as HTMLButtonElement;
+    expect(btn).not.toBeNull();
+    fireEvent.click(btn);
+    const toggle = await waitFor(() =>
+      getByRole("button", { name: /Thinking mode/ }),
+    );
+    fireEvent.click(toggle);
+    fireEvent.click(getByRole("button", { name: "Save" }));
+    await waitFor(() => {
+      expect(setModelParams).toHaveBeenCalledWith(
+        "deepseek",
+        "api_key",
+        "deepseek-v4",
+        { thinking: { type: "disabled" } },
+      );
+    });
   });
 });

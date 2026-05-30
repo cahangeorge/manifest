@@ -1,4 +1,5 @@
-import { HttpException } from '@nestjs/common';
+import { HttpException, HttpStatus } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { OpenaiOauthController } from './oauth/openai-oauth.controller';
 import { OpenaiOauthService } from './oauth/openai-oauth.service';
 import { ResolveAgentService } from './routing-core/resolve-agent.service';
@@ -12,6 +13,7 @@ describe('OpenaiOauthController', () => {
   let resolveAgent: jest.Mocked<ResolveAgentService>;
   let providerKeyService: jest.Mocked<ProviderKeyService>;
   let providerService: jest.Mocked<ProviderService>;
+  let configService: jest.Mocked<ConfigService>;
 
   beforeEach(() => {
     oauthService = {
@@ -24,18 +26,23 @@ describe('OpenaiOauthController', () => {
     } as unknown as jest.Mocked<ResolveAgentService>;
 
     providerKeyService = {
-      getProviderApiKey: jest.fn(),
+      getProviderKeys: jest.fn(),
     } as unknown as jest.Mocked<ProviderKeyService>;
 
     providerService = {
       removeProvider: jest.fn().mockResolvedValue({ notifications: [] }),
     } as unknown as jest.Mocked<ProviderService>;
 
+    configService = {
+      get: jest.fn().mockReturnValue(undefined),
+    } as unknown as jest.Mocked<ConfigService>;
+
     controller = new OpenaiOauthController(
       oauthService,
       resolveAgent,
       providerKeyService,
       providerService,
+      configService,
     );
   });
 
@@ -111,69 +118,157 @@ describe('OpenaiOauthController', () => {
         controller.authorize('my-agent', { id: 'user-1' } as never, req),
       ).rejects.toThrow('Failed to start OAuth callback server');
     });
+
+    it('uses BETTER_AUTH_URL from config when set, ignoring Host header', async () => {
+      resolveAgent.resolve.mockResolvedValue({ id: 'agent-id-1' } as never);
+      oauthService.generateAuthorizationUrl.mockResolvedValue('https://auth.openai.com/oauth/...');
+      configService.get.mockReturnValue('https://manifest.example.com');
+
+      const req = {
+        protocol: 'http',
+        get: jest.fn().mockReturnValue('evil.example'),
+      } as unknown as Request;
+
+      await controller.authorize('my-agent', { id: 'user-1' } as never, req);
+
+      expect(oauthService.generateAuthorizationUrl).toHaveBeenCalledWith(
+        'agent-id-1',
+        'user-1',
+        'https://manifest.example.com',
+      );
+    });
   });
 
   describe('revoke', () => {
     it('throws 400 when agentName is missing', async () => {
       await expect(
-        controller.revoke(undefined as unknown as string, { id: 'user-1' } as never),
+        controller.revoke(undefined as unknown as string, undefined, { id: 'user-1' } as never),
       ).rejects.toThrow(HttpException);
     });
 
     it('throws 400 when agentName is empty string', async () => {
-      await expect(controller.revoke('', { id: 'user-1' } as never)).rejects.toThrow(HttpException);
+      await expect(controller.revoke('', undefined, { id: 'user-1' } as never)).rejects.toThrow(
+        HttpException,
+      );
     });
 
-    it('revokes both access and refresh tokens from stored blob', async () => {
+    it('revokes every active OpenAI subscription key when no label is provided', async () => {
       resolveAgent.resolve.mockResolvedValue({ id: 'agent-id-1' } as never);
-      const blob = JSON.stringify({ t: 'access-tok', r: 'refresh-tok', e: Date.now() + 3600000 });
-      providerKeyService.getProviderApiKey.mockResolvedValue(blob);
+      providerKeyService.getProviderKeys.mockResolvedValue([
+        {
+          id: 'key-1',
+          label: 'Default',
+          priority: 0,
+          apiKey: JSON.stringify({ t: 'access-tok', r: 'refresh-tok', e: Date.now() + 3600000 }),
+          region: null,
+        },
+        {
+          id: 'key-2',
+          label: 'Key 2',
+          priority: 1,
+          apiKey: JSON.stringify({ t: 'access-2', r: 'refresh-2', e: Date.now() + 3600000 }),
+          region: null,
+        },
+      ]);
 
-      const result = await controller.revoke('my-agent', { id: 'user-1' } as never);
+      const result = await controller.revoke('my-agent', undefined, { id: 'user-1' } as never);
 
-      expect(providerKeyService.getProviderApiKey).toHaveBeenCalledWith(
+      expect(providerKeyService.getProviderKeys).toHaveBeenCalledWith(
         'agent-id-1',
         'openai',
         'subscription',
       );
       expect(oauthService.revokeToken).toHaveBeenCalledWith('access-tok');
       expect(oauthService.revokeToken).toHaveBeenCalledWith('refresh-tok');
+      expect(oauthService.revokeToken).toHaveBeenCalledWith('access-2');
+      expect(oauthService.revokeToken).toHaveBeenCalledWith('refresh-2');
       expect(providerService.removeProvider).toHaveBeenCalledWith(
         'agent-id-1',
         'openai',
         'subscription',
+        undefined,
       );
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, notifications: [] });
+    });
+
+    it('revokes and removes only the labeled OpenAI subscription key', async () => {
+      resolveAgent.resolve.mockResolvedValue({ id: 'agent-id-1' } as never);
+      providerKeyService.getProviderKeys.mockResolvedValue([
+        {
+          id: 'key-1',
+          label: 'Default',
+          priority: 0,
+          apiKey: JSON.stringify({ t: 'access-tok', r: 'refresh-tok', e: Date.now() + 3600000 }),
+          region: null,
+        },
+        {
+          id: 'key-2',
+          label: 'Key 2',
+          priority: 1,
+          apiKey: JSON.stringify({ t: 'access-2', r: 'refresh-2', e: Date.now() + 3600000 }),
+          region: null,
+        },
+      ]);
+
+      const result = await controller.revoke('my-agent', 'Key 2', { id: 'user-1' } as never);
+
+      expect(oauthService.revokeToken).not.toHaveBeenCalledWith('access-tok');
+      expect(oauthService.revokeToken).not.toHaveBeenCalledWith('refresh-tok');
+      expect(oauthService.revokeToken).toHaveBeenCalledWith('access-2');
+      expect(oauthService.revokeToken).toHaveBeenCalledWith('refresh-2');
+      expect(providerService.removeProvider).toHaveBeenCalledWith(
+        'agent-id-1',
+        'openai',
+        'subscription',
+        'Key 2',
+      );
+      expect(result).toEqual({ ok: true, notifications: [] });
+    });
+
+    it('rejects repeated label query parameters', async () => {
+      await expect(
+        controller.revoke('my-agent', ['Key 1', 'Key 2'], { id: 'user-1' } as never),
+      ).rejects.toMatchObject({
+        message: 'label query parameter must be a string',
+        status: HttpStatus.BAD_REQUEST,
+      });
+      expect(resolveAgent.resolve).not.toHaveBeenCalled();
+      expect(providerKeyService.getProviderKeys).not.toHaveBeenCalled();
+      expect(providerService.removeProvider).not.toHaveBeenCalled();
     });
 
     it('returns ok even when no stored token exists', async () => {
       resolveAgent.resolve.mockResolvedValue({ id: 'agent-id-1' } as never);
-      providerKeyService.getProviderApiKey.mockResolvedValue(null);
+      providerKeyService.getProviderKeys.mockResolvedValue([]);
 
-      const result = await controller.revoke('my-agent', { id: 'user-1' } as never);
+      const result = await controller.revoke('my-agent', undefined, { id: 'user-1' } as never);
 
       expect(oauthService.revokeToken).not.toHaveBeenCalled();
       expect(providerService.removeProvider).toHaveBeenCalledWith(
         'agent-id-1',
         'openai',
         'subscription',
+        undefined,
       );
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, notifications: [] });
     });
 
     it('returns ok when token blob is not valid JSON', async () => {
       resolveAgent.resolve.mockResolvedValue({ id: 'agent-id-1' } as never);
-      providerKeyService.getProviderApiKey.mockResolvedValue('not-json');
+      providerKeyService.getProviderKeys.mockResolvedValue([
+        { id: 'key-1', label: 'Default', priority: 0, apiKey: 'not-json', region: null },
+      ]);
 
-      const result = await controller.revoke('my-agent', { id: 'user-1' } as never);
+      const result = await controller.revoke('my-agent', undefined, { id: 'user-1' } as never);
 
       expect(oauthService.revokeToken).not.toHaveBeenCalled();
       expect(providerService.removeProvider).toHaveBeenCalledWith(
         'agent-id-1',
         'openai',
         'subscription',
+        undefined,
       );
-      expect(result).toEqual({ ok: true });
+      expect(result).toEqual({ ok: true, notifications: [] });
     });
   });
 
